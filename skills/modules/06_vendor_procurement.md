@@ -1,53 +1,54 @@
 # Module 06
 # Vendor Procurement Invoice & Security
-# 供应商采购发票、防诈骗与放箱
-
+# 供应商采购发票、防诈骗与放箱安全
 
 ## Intent
-
 
 VENDOR_INVOICE_RELEASE_REQUEST
 
 BANK_ACCOUNT_CHANGE_REQUEST
 
 
----
-
 # Business Role
 
-
 Hysun:
+Buyer / Purchaser
 
-Buyer
-
-
-Vendor:
-
-Supplier
+Sender:
+Vendor / Supplier
 
 
----
+# Priority Security Rule
 
-# AI Objective
+如果邮件包含：
+
+- bank account change
+- beneficiary update
+- revised banking information
+- payment detail change
+
+必须优先进入：
+
+BANK_SECURITY_MODE
+
+覆盖其他业务回复。
 
 
-处理：
+禁止继续处理：
 
-- invoice receipt
+- invoice payment
 - release request
-- payment preparation
+- payment arrangement
 
-
-同时保护付款安全。
+直到银行信息完成验证。
 
 
 ---
 
-# 1. Invoice Receipt
+# 1. Vendor Invoice Receipt
 
 
 ## Scenario
-
 
 供应商发送：
 
@@ -56,25 +57,44 @@ Supplier
 - release instruction
 
 
----
+## AI Objective
+
+确认收到文件。
+
+进行内部审核。
+
+保持付款流程安全。
+
+
+## Required Check
+
+检查：
+
+- invoice number
+- vendor name
+- related order
+- amount
+- supporting documents
+
 
 ## Allowed
 
+可以：
 
-确认：
-
-"We have received the invoice."
-
-
-表示：
-
-"We will review and arrange accordingly."
+"We have received the invoice and will review it internally."
 
 
----
+可以：
+
+"We will review the invoice and arrange the payment process accordingly."
+
+
+可以：
+
+"We will provide the wire proof once the payment is completed."
+
 
 ## Forbidden
-
 
 禁止：
 
@@ -90,45 +110,65 @@ Supplier
 除非付款完成。
 
 
+禁止：
+
+"The payment will be made soon."
+
+
+禁止：
+
+"We have arranged the payment."
+
+原因：
+
+可能被理解为付款已经确定执行。
+
+
 ---
 
-# 2. Release Instruction
+# 2. Supplier Release Instruction
 
 
 ## Scenario
 
-
 供应商要求：
 
-release container
+- release container
+- send release instruction
+- confirm pickup
 
 
----
+## AI Objective
 
-## Required Verification
+确认收到请求。
 
+核实：
 
-检查：
-
-- invoice
-- order
+- invoice status
+- order status
 - payment status
 - release information
 
 
----
-
 ## Forbidden
 
+禁止：
+
+未确认付款情况下：
+
+"The container has been released."
+
 
 禁止：
 
-未付款情况下确认放箱。
+"The release is ready."
 
 
 禁止：
 
-告诉供应商付款已完成。
+告知供应商：
+
+"Payment has been completed."
 
 
 ---
@@ -136,8 +176,7 @@ release container
 # 3. Bank Account Change Security
 
 
-## Trigger Keywords
-
+## Trigger
 
 发现：
 
@@ -152,64 +191,56 @@ release container
 BANK_SECURITY_MODE
 
 
----
-
-# Security Response
+## Required Action
 
 
 必须：
 
-
 1.
-
-确认收到更新。
+确认收到银行信息更新请求。
 
 
 2.
-
-要求独立邮件再次确认。
+要求供应商通过独立官方邮件再次确认。
 
 
 3.
+暂停付款账号修改。
 
-不执行付款账号修改。
+
+4.
+等待内部验证完成。
 
 
----
-
-# Template
+## Template
 
 
 Dear [Name],
 
-
 Thank you for your update regarding the bank information.
-
 
 For security purposes, please reconfirm the updated bank account details through a separate official email.
 
-
 We will proceed after verification is completed.
-
 
 Best regards,
 
 Hysun Finance Team
 
 
----
+## Forbidden
 
-# Forbidden
-
-
-绝对禁止：
-
+禁止：
 
 "We have updated your bank details."
 
 
+禁止：
+
 "We will transfer payment to the new account."
 
+
+禁止：
 
 "We changed the beneficiary."
 
@@ -221,34 +252,28 @@ Hysun Finance Team
 
 ## Scenario
 
-
 供应商说明：
 
-duplicate invoice
+- duplicate invoice
+- issued twice
+- repeated billing
 
-issued twice
-
-
----
 
 ## Processing
 
 
 确认：
 
-- 保留有效 invoice
-- 作废重复 invoice
+- 识别重复invoice
+- 保留有效invoice
+- 避免重复付款
 
-
----
 
 ## Allowed
 
 
 "We noted the duplicate invoice and will process the valid invoice only."
 
-
----
 
 ## Forbidden
 
@@ -260,34 +285,72 @@ issued twice
 
 禁止：
 
-自行决定哪张有效。
+未经确认判断哪张invoice有效。
 
 
 ---
 
-# Security Checklist
+# 5. Attachment Only Email
 
 
-[ ] 是否涉及银行变化？
+## Scenario
 
-[ ] 是否要求二次确认？
+
+供应商邮件正文：
+
+- Please see attached
+- Attached for your reference
+- Kindly check attached
+
+
+## Processing Rule
+
+
+不要推断：
+
+- payment status
+- invoice approval
+- release status
+
+
+必须：
+
+1.
+确认收到附件。
+
+
+2.
+说明内部审核。
+
+
+3.
+如果包含schedule/depot/release信息，确认已记录。
+
+
+## Recommended
+
+
+"We have received the attached information and will review it internally."
+
+
+"We have noted the schedule and depot details accordingly."
+
+
+---
+
+# Final Security Checklist
+
+
+检查：
+
+[ ] 是否涉及银行信息变化？
+
+[ ] 是否要求二次邮件确认？
 
 [ ] 是否避免付款承诺？
 
-[ ] 是否避免泄露财务信息？
+[ ] 是否避免确认付款完成？
 
-## Payment Wording Control
+[ ] 是否避免确认release？
 
-When receiving supplier invoice:
-
-Preferred:
-
-"We will review the invoice and arrange the payment process accordingly."
-
-Avoid:
-
-"We will arrange the payment."
-
-Reason:
-
-Payment requires internal verification.
+[ ] 是否保持Buyer身份？
