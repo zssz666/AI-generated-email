@@ -1,0 +1,155 @@
+{
+  "version": "2.1",
+
+  "global_rules_file": "global_rules.md",
+
+  "response_guard_file": "response_guard.md",
+
+  "entity_rules_file": "entity_rules.md",
+
+  "router_config": {
+    "multi_intent": true,
+    "max_secondary_intents": 3,
+
+    "intent_priority": [
+      "BANK_ACCOUNT_CHANGE_REQUEST",
+      "URGENT_PAYMENT_CHANGE",
+      "PAYMENT_RISK_CHECK",
+      "VENDOR_INVOICE_RELEASE_REQUEST",
+      "PAYMENT_CONFIRMATION_REQUEST",
+      "COMPLAINT_CONDITION",
+      "ORDER_CONFIRM_INVOICE"
+    ]
+  },
+
+
+  "intent_to_module": {
+
+
+    "STOCK_PRICE_INQUIRY":
+    "modules/01_sales_inquiry.md",
+
+    "QUOTE_ACKNOWLEDGMENT":
+    "modules/01_sales_inquiry.md",
+
+
+
+    "ORDER_CONFIRM_INVOICE":
+    "modules/02_order_and_commission.md",
+
+    "INTERMEDIARY_COMMISSION_ORDER":
+    "modules/02_order_and_commission.md",
+
+    "EXTENSION_REQUEST":
+    "modules/02_order_and_commission.md",
+
+
+
+    "RELEASE_STATUS_CHECK":
+    "modules/03_fulfillment_and_ops.md",
+
+    "OWNERSHIP_TRANSFER_TRACKING":
+    "modules/03_fulfillment_and_ops.md",
+
+    "DOCUMENT_REQUEST":
+    "modules/03_fulfillment_and_ops.md",
+
+    "PICKUP_SCHEDULE_REQUEST":
+    "modules/03_fulfillment_and_ops.md",
+
+
+
+    "COMPLAINT_CONDITION":
+    "modules/04_complaint_and_aftersales.md",
+
+    "ORDER_CANCELLATION":
+    "modules/04_complaint_and_aftersales.md",
+
+    "COST_NEGOTIATION":
+    "modules/04_complaint_and_aftersales.md",
+
+
+
+    "VENDOR_PAYMENT_REMINDER":
+    "modules/05_vendor_finance_soa.md",
+
+
+
+    "VENDOR_INVOICE_RELEASE_REQUEST":
+    "modules/06_vendor_procurement.md",
+
+    "BANK_ACCOUNT_CHANGE_REQUEST":
+    "modules/06_vendor_procurement.md",
+
+    "DUPLICATE_INVOICE_REPORT":
+    "modules/06_vendor_procurement.md",
+
+    "VENDOR_INVOICE_RECEIVED":
+    "modules/06_vendor_procurement.md",
+
+    "PAYMENT_STATUS_INQUIRY":
+    "modules/07_finance_payment.md",
+
+    "PAYMENT_CONFIRMATION_REQUEST":
+    "modules/07_finance_payment.md",
+
+    "WIRE_PROOF_REQUEST":
+    "modules/07_finance_payment.md",
+
+
+    "PAYMENT_RISK_CHECK":
+    "modules/07_finance_payment.md",
+
+    "URGENT_PAYMENT_CHANGE":
+    "modules/06_vendor_procurement.md"
+
+  },
+
+  "secondary_intent_rules": {
+
+    "VENDOR_INVOICE_RELEASE_REQUEST": [
+      "WIRE_PROOF_REQUEST",
+      "PICKUP_SCHEDULE_REQUEST",
+      "PAYMENT_CONFIRMATION_REQUEST"
+    ],
+
+    "ORDER_CONFIRM_INVOICE": [
+      "DOCUMENT_REQUEST",
+      "PICKUP_SCHEDULE_REQUEST"
+    ],
+
+
+    "PAYMENT_CONFIRMATION_REQUEST": [
+      "WIRE_PROOF_REQUEST"
+    ],
+
+    "BANK_ACCOUNT_CHANGE_REQUEST": [
+      "PAYMENT_RISK_CHECK"
+    ]
+  },
+
+  "risk_intents": [
+    "BANK_ACCOUNT_CHANGE_REQUEST",
+    "URGENT_PAYMENT_CHANGE",
+    "PAYMENT_RISK_CHECK",
+    "THIRD_PARTY_PAYMENT_REQUEST",
+    "CRYPTO_PAYMENT_REQUEST"
+  ],
+
+  "router_output_schema": {
+    "primary_intent": "string",
+    "secondary_intents": [
+      "string"
+    ],
+    "entities": {
+      "container_type": "string",
+      "container_number": "string",
+      "invoice_number": "string",
+      "pi_number": "string",
+      "release_code": "string",
+      "company_role": "customer/vendor/intermediary"
+    },
+    "risk_level":
+    "LOW/MEDIUM/HIGH"
+  }
+}
