@@ -333,7 +333,8 @@
 
       "company_role":
 
-      "customer/vendor/intermediary"
+      "customer/vendor/intermediary",
+      "target_location": "string"
 
     },
 
