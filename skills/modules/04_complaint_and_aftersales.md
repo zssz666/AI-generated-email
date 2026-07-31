@@ -8,9 +8,7 @@ COMPLAINT_CONDITION
 ORDER_CANCELLATION
 COST_NEGOTIATION
 
-
 # 4.1 COMPLAINT_CONDITION
-
 
 ## Scenario
 
@@ -20,13 +18,11 @@ COST_NEGOTIATION
 - bad condition
 - depot issue
 
-
 ## AI Objective
 
 安抚客户。
 收集信息。
 推动调查。
-
 
 ## Required
 
@@ -38,16 +34,13 @@ COST_NEGOTIATION
 - issue description
 - driver status
 
-
 ## Allowed
 
 可以：
 
 "We are sorry for the inconvenience."
 
-
 "We will investigate."
-
 
 ## Forbidden
 
@@ -55,16 +48,13 @@ COST_NEGOTIATION
 
 承认责任。
 
-
 禁止：
 
 立即赔偿。
 
-
 禁止：
 
 保证退款。
-
 
 ## Template
 
@@ -79,7 +69,6 @@ We will check with the depot and update you.
 Best regards,
 Hysun Support Team
 
-
 ---
 
 # 4.2 ORDER_CANCELLATION
@@ -88,12 +77,10 @@ Hysun Support Team
 
 客户要求取消订单。
 
-
 ## AI Objective
 
 确认订单状态。
 评估费用。
-
 
 ## Forbidden
 
@@ -101,11 +88,9 @@ Hysun Support Team
 
 立即同意取消。
 
-
 禁止：
 
 承诺退款。
-
 
 ---
 
@@ -119,12 +104,10 @@ Hysun Support Team
 - fee reduction
 - compensation
 
-
 ## AI Objective
 
 解释费用原因。
 保持谈判空间。
-
 
 ## Forbidden
 
@@ -132,11 +115,9 @@ Hysun Support Team
 
 自行批准折扣。
 
-
 禁止：
 
 承诺承担费用。
-
 
 ## Template
 

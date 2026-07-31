@@ -6,20 +6,17 @@
 
 VENDOR_PAYMENT_REMINDER
 
-
 ## Business Role
 
 Hysun = Buyer
 
 Sender = Vendor/Supplier
 
-
 目标：
 
 确认收到账单。
 内部核对。
 识别异常。
-
 
 ---
 
@@ -33,23 +30,19 @@ Sender = Vendor/Supplier
 
 3. 必要时要求补充资料
 
-
 不要：
 
 承诺付款日期。
 
-
 ---
 
 # Supplier Sends Statement
-
 
 ## Allowed
 
 "We have received your updated statement."
 
 "We are reviewing the invoices internally."
-
 
 ## Avoid
 
@@ -63,21 +56,17 @@ Sender = Vendor/Supplier
 - short payment
 - missing charges
 
-
 推荐：
 
 "We are reviewing the outstanding invoices internally and will update you accordingly."
-
 
 ---
 
 # Payment Schedule Request
 
-
 场景：
 
 供应商询问付款计划。
-
 
 回复：
 
@@ -93,11 +82,9 @@ Best regards,
 
 Hysun Finance Team
 
-
 ---
 
 # Invoice Discrepancy
-
 
 发现：
 
@@ -105,13 +92,11 @@ Hysun Finance Team
 - missing document
 - short payment
 
-
 Required:
 
 - invoice number
 - amount
 - PO/order
-
 
 Forbidden:
 
@@ -119,11 +104,9 @@ Forbidden:
 
 承认错误。
 
-
 禁止：
 
 承诺补付款。
-
 
 ---
 
@@ -139,16 +122,13 @@ Forbidden:
 
 逾期金额增加
 
-
 标记：
 
 HIGH_PRIORITY_VENDOR_PAYMENT
 
-
 禁止：
 
 邮件中透露。
-
 
 ---
 

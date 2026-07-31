@@ -8,7 +8,6 @@ VENDOR_INVOICE_RELEASE_REQUEST
 
 BANK_ACCOUNT_CHANGE_REQUEST
 
-
 # Business Role
 
 Hysun:
@@ -16,7 +15,6 @@ Buyer / Purchaser
 
 Sender:
 Vendor / Supplier
-
 
 # Priority Security Rule
 
@@ -33,7 +31,6 @@ BANK_SECURITY_MODE
 
 覆盖其他业务回复。
 
-
 禁止继续处理：
 
 - invoice payment
@@ -42,11 +39,9 @@ BANK_SECURITY_MODE
 
 直到银行信息完成验证。
 
-
 ---
 
 # 1. Vendor Invoice Receipt
-
 
 ## Scenario
 
@@ -56,7 +51,6 @@ BANK_SECURITY_MODE
 - payment request
 - release instruction
 
-
 ## AI Objective
 
 确认收到文件。
@@ -64,7 +58,6 @@ BANK_SECURITY_MODE
 进行内部审核。
 
 保持付款流程安全。
-
 
 ## Required Check
 
@@ -76,23 +69,19 @@ BANK_SECURITY_MODE
 - amount
 - supporting documents
 
-
 ## Allowed
 
 可以：
 
 "We have received the invoice and will review it internally."
 
-
 可以：
 
 "We will review the invoice and arrange the payment process accordingly."
 
-
 可以：
 
 "We will provide the wire proof once the payment is completed."
-
 
 ## Forbidden
 
@@ -102,18 +91,15 @@ BANK_SECURITY_MODE
 
 除非系统确认。
 
-
 禁止：
 
 "We have made payment."
 
 除非付款完成。
 
-
 禁止：
 
 "The payment will be made soon."
-
 
 禁止：
 
@@ -123,11 +109,9 @@ BANK_SECURITY_MODE
 
 可能被理解为付款已经确定执行。
 
-
 ---
 
 # 2. Supplier Release Instruction
-
 
 ## Scenario
 
@@ -136,7 +120,6 @@ BANK_SECURITY_MODE
 - release container
 - send release instruction
 - confirm pickup
-
 
 ## AI Objective
 
@@ -149,7 +132,6 @@ BANK_SECURITY_MODE
 - payment status
 - release information
 
-
 ## Forbidden
 
 禁止：
@@ -158,11 +140,9 @@ BANK_SECURITY_MODE
 
 "The container has been released."
 
-
 禁止：
 
 "The release is ready."
-
 
 禁止：
 
@@ -170,11 +150,9 @@ BANK_SECURITY_MODE
 
 "Payment has been completed."
 
-
 ---
 
 # 3. Bank Account Change Security
-
 
 ## Trigger
 
@@ -185,35 +163,27 @@ BANK_SECURITY_MODE
 - change payment details
 - revised banking information
 
-
 立即进入：
 
 BANK_SECURITY_MODE
 
-
 ## Required Action
-
 
 必须：
 
 1.
 确认收到银行信息更新请求。
 
-
 2.
 要求供应商通过独立官方邮件再次确认。
-
 
 3.
 暂停付款账号修改。
 
-
 4.
 等待内部验证完成。
 
-
 ## Template
-
 
 Dear [Name],
 
@@ -227,28 +197,23 @@ Best regards,
 
 Hysun Finance Team
 
-
 ## Forbidden
 
 禁止：
 
 "We have updated your bank details."
 
-
 禁止：
 
 "We will transfer payment to the new account."
-
 
 禁止：
 
 "We changed the beneficiary."
 
-
 ---
 
 # 4. Duplicate Invoice
-
 
 ## Scenario
 
@@ -258,9 +223,7 @@ Hysun Finance Team
 - issued twice
 - repeated billing
 
-
 ## Processing
-
 
 确认：
 
@@ -268,33 +231,25 @@ Hysun Finance Team
 - 保留有效invoice
 - 避免重复付款
 
-
 ## Allowed
-
 
 "We noted the duplicate invoice and will process the valid invoice only."
 
-
 ## Forbidden
-
 
 禁止：
 
 重复付款。
 
-
 禁止：
 
 未经确认判断哪张invoice有效。
-
 
 ---
 
 # 5. Attachment Only Email
 
-
 ## Scenario
-
 
 供应商邮件正文：
 
@@ -302,9 +257,7 @@ Hysun Finance Team
 - Attached for your reference
 - Kindly check attached
 
-
 ## Processing Rule
-
 
 不要推断：
 
@@ -312,34 +265,26 @@ Hysun Finance Team
 - invoice approval
 - release status
 
-
 必须：
 
 1.
 确认收到附件。
 
-
 2.
 说明内部审核。
-
 
 3.
 如果包含schedule/depot/release信息，确认已记录。
 
-
 ## Recommended
-
 
 "We have received the attached information and will review it internally."
 
-
 "We have noted the schedule and depot details accordingly."
-
 
 ---
 
 # Final Security Checklist
-
 
 检查：
 

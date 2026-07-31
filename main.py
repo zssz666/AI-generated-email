@@ -1,5 +1,7 @@
 import json
 import os
+from functools import lru_cache
+
 import pymysql
 import requests
 from dotenv import load_dotenv
@@ -16,6 +18,10 @@ ai_client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL
 )
+
+# 统一模型常量：原代码中同一个模型名被硬编码了 3 次（Router/Drafter/Reviewer），
+# 后续升级模型只需改这一处。如果不同阶段需要不同模型，可以拆成三个常量。
+AI_MODEL = "deepseek-v4-flash"
 
 # ==========================================================
 # 2. 数据库配置
@@ -38,6 +44,11 @@ SKILLS_DIR = os.path.join(BASE_DIR, "skills")
 # ==========================================================
 # 3. Skill系统加载
 # ==========================================================
+# 规则文件在服务运行期间基本不会变化（不像库存/城市/箱型是动态数据），
+# 之前的实现是每处理一封邮件就把 index.json 和所有 .md 文件重新读一遍磁盘。
+# 这里用 lru_cache 缓存，和下面 fetch_system_* 系列的缓存模式保持一致。
+# 如果规则文件会被热更新，调用 reload_skill_cache() 清空缓存即可。
+@lru_cache(maxsize=1)
 def get_index_config():
     path = os.path.join(SKILLS_DIR, "index.json")
     try:
@@ -48,6 +59,7 @@ def get_index_config():
         return {}
 
 
+@lru_cache(maxsize=None)
 def load_skill_file(filename):
     path = os.path.join(SKILLS_DIR, filename)
     if not os.path.exists(path):
@@ -55,6 +67,12 @@ def load_skill_file(filename):
         return ""
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def reload_skill_cache():
+    """规则文件热更新后调用，清空缓存重新读取磁盘。"""
+    get_index_config.cache_clear()
+    load_skill_file.cache_clear()
 
 
 def load_global_rules():
@@ -157,8 +175,12 @@ def fetch_system_countries():
     return []
 
 
-# 全局缓存系统箱型列表
+# 全局缓存系统箱型列表：{"40hcos4d": "31", ...} 用于"箱型文字 -> id"编码(询价时反查库存)
 SYSTEM_CONTAINER_TYPES_CACHE = {}
+# 反向缓存：{"31": "40HC OS 4D", ...} 用于"id -> 箱型文字"解码(读库存返回的SKU时使用)
+# 与下面 HYSUN_CONTAINER_TYPES 是同一份业务数据的两个方向，之前分别维护一份动态、一份硬编码，
+# 存在两处数据不同步的风险；这里让两者共用同一次接口调用的结果，硬编码表降级为接口异常时的兜底。
+SYSTEM_CONTAINER_ID_TO_NAME_CACHE = {}
 
 
 def fetch_system_container_types():
@@ -166,7 +188,7 @@ def fetch_system_container_types():
     调用后端的 /getAllBoxServlet 接口，动态同步箱型字典 (对标前端 getBoxPile)
     返回字典格式: {"40hcos4d": "31", "20dc": "03", "40hc": "25", ...}
     """
-    global SYSTEM_CONTAINER_TYPES_CACHE
+    global SYSTEM_CONTAINER_TYPES_CACHE, SYSTEM_CONTAINER_ID_TO_NAME_CACHE
     if SYSTEM_CONTAINER_TYPES_CACHE:
         return SYSTEM_CONTAINER_TYPES_CACHE
 
@@ -179,6 +201,7 @@ def fetch_system_container_types():
             box_list = data.get("obj", [])
 
             valid_boxes = {}
+            id_to_name = {}
             for item in box_list:
                 # 提取 id 和 箱型代码 (例如 id: 31, code: "40HC OS 4D")
                 raw_id = item.get("id")
@@ -193,8 +216,11 @@ def fetch_system_container_types():
 
                     # 存入字典 {"40hcos4d": "31"}
                     valid_boxes[clean_code] = box_id
+                    # 反向存入原始可读名字 {"31": "40HC OS 4D"}，用于解码展示
+                    id_to_name[box_id] = raw_code.strip()
 
             SYSTEM_CONTAINER_TYPES_CACHE = valid_boxes
+            SYSTEM_CONTAINER_ID_TO_NAME_CACHE = id_to_name
             print(f"✅ [系统启动] 成功同步系统箱型字典，共 {len(SYSTEM_CONTAINER_TYPES_CACHE)} 种箱型。")
             return SYSTEM_CONTAINER_TYPES_CACHE
     except Exception as e:
@@ -247,7 +273,9 @@ def fetch_system_colors():
 # ==========================================================
 # 内部编码与解码映射库
 # ==========================================================
-HYSUN_CONTAINER_TYPES = {
+# 兜底表：仅在 /getAllBoxServlet 接口不可用时使用，正常情况下解码优先走
+# SYSTEM_CONTAINER_ID_TO_NAME_CACHE（与编码用的是同一份接口数据，天然保持同步）。
+HYSUN_CONTAINER_TYPES_FALLBACK = {
     1: "10DC", 2: "10HC", 3: "20DC", 4: "20DC RF", 5: "20DC DD", 6: "20DC OS FOS",
     7: "20DC OS 2D", 8: "20DC OS 4D", 9: "20DC HT", 10: "20DC OT", 11: "20DC FR",
     12: "20HC", 13: "20HC OT", 14: "20HC OS FOS", 15: "20HC HT", 16: "20HC PW",
@@ -283,7 +311,10 @@ def parse_hysun_idcode(idcode: str):
     type_id = int(idcode[4:6])
     cond_id = int(idcode[6:7])
 
-    box_type = HYSUN_CONTAINER_TYPES.get(type_id, f"Type-{type_id}")
+    # 优先用接口动态数据解码(与编码共享同一份数据，不会跑偏)，查不到再退回硬编码兜底表
+    fetch_system_container_types()  # 确保动态字典已加载(命中缓存则直接返回)
+    box_type = SYSTEM_CONTAINER_ID_TO_NAME_CACHE.get(str(type_id).zfill(2)) \
+        or HYSUN_CONTAINER_TYPES_FALLBACK.get(type_id, f"Type-{type_id}")
     box_cond = HYSUN_CONDITIONS.get(cond_id, f"Cond-{cond_id}")
 
     # 动态匹配颜色英文名
@@ -498,11 +529,15 @@ def predict_intent(e_title, e_content):
     non_business_cfg = cfg.get("non_business_config", {})
     router_config = cfg.get("router_config", {})
 
-    # ==========================================
-    # 🌟 新增：获取动态系统城市列表并转为字符串
-    # ==========================================
+    # 🌟 动态系统城市列表
     valid_cities = fetch_system_cities()
     cities_str = ", ".join(valid_cities) if valid_cities else "Shanghai, Ningbo, Qingdao, Antwerp, Rotterdam"
+
+    # 之前 Router 阶段没有加载 entity_rules.md，只能靠一条简化的内联规则提取箱型/地点，
+    # 导致 Router 提取的实体(container_type等)比 Drafter 阶段掌握的规则要粗糙很多，
+    # 而后续的库存检索(query_internal_inventory)恰恰是直接用 Router 提取的实体去查询的。
+    # 这里把权威的实体识别规范一并交给 Router，删掉原来重复且更简陋的内联箱型规则。
+    entity_rules = load_entity_rules()
 
     router_prompt = f"""你是Hysun企业邮件意图识别引擎。
     你的任务：
@@ -514,18 +549,14 @@ def predict_intent(e_title, e_content):
     路由配置 (优先级与多意图限制)：
     {json.dumps(router_config, ensure_ascii=False, indent=2)}
     ========================
-   ========================
-【🚨 实体提取强化规则】
-1. 地理位置 (target_location):
-   - 当前我们系统支持的标准城市列表如下：[{cities_str}]
-   - 【城市级】：强制对齐并纠错为上方列表中的标准拼写（如 Shangai -> Shanghai）。
-   - 【国家/大洲级】：直接提取英文名，绝对不可留空 ""！
-   - 完全未提及地点时才允许输出 ""。
-
-2. 箱型尺寸 (container_type): 
-   - 必须完整包含【数字尺寸】、【箱型英文】以及【特殊属性/后缀】（例如：20'DC, 40'HC OS 4D, 40'OT 等）。
-   - 如果包含多个箱型，用逗号分隔。
-   - 🛑 绝对禁止丢弃前缀的数字尺寸或客户写的特殊特种箱后缀！
+【实体识别权威规范】(箱型字典、箱况黑话、标点豁免比对等均以此为准)
+    {entity_rules}
+========================
+【🚨 地理位置提取补充规则】(entity_rules.md 未包含的动态数据)
+    - 当前系统支持的标准城市列表：[{cities_str}]
+    - 【城市级】：强制对齐并纠错为上方列表中的标准拼写（如 Shangai -> Shanghai）。
+    - 【国家/大洲级】：直接提取英文名，绝对不可留空 ""！
+    - 完全未提及地点时才允许输出 ""。
 ========================
 
 必须严格按照以下 JSON Schema 输出：
@@ -533,9 +564,11 @@ def predict_intent(e_title, e_content):
 
 规则：
 1. 【最高指令 - 身份拦截与豁免】：
-   - 只要对方在邮件中表达了**“寻找、需求、购买”集装箱**的意图（如 "I need...", "Looking for..."），无论对方签名是采购经理(Purchasing)还是同行贸易公司，一律豁免，视为真实客户(Customer)！
+   - 只要对方在邮件中表达了"寻找、需求、购买"集装箱的意图（如 "I need...", "Looking for...", "purchase"），无论对方签名是采购经理(Purchasing)还是同行贸易公司，一律豁免，视为真实客户(Customer)！
    - 只有当对方试图【向我们推销产品/服务】、【兜售空箱】或【催收账款】时，才判定为 NON_CUSTOMER_EMAIL，并强制输出 NO_REPLY！
-2. 【最高指令 - 业务拦截】：系统仅处理“销售(Sale)”业务。如果询问“租赁(Lease/Rent)”，primary_intent 必须是 LEASE_INQUIRY，action 输出 NO_REPLY！
+2. 🚨【最高指令 - 业务拦截与混合豁免】：
+   - 系统仅提供"销售(Sale)"业务。如果对方纯粹且仅仅询问"租赁(Lease/Rent)"，primary_intent 必须是 LEASE_INQUIRY，action 输出 NO_REPLY！
+   - 💡【混合豁免条款】：如果客户在邮件中同时提到了"购买 (Purchase/Buy)"和"租赁 (Lease/Rent)"（例如 "purchase and/or lease"），必须将其判定为真实的买家！primary_intent 设为 STOCK_PRICE_INQUIRY，并允许 action 输出 REPLY。绝对禁止因包含 lease 而误杀潜在买单！
 3. 非业务邮件(营销、平台通知) -> NON_BUSINESS_EMAIL -> NO_REPLY。
 4. 只有当确定对方是买家且询问买卖业务时，action 允许是 REPLY。
 5. 多请求放在 secondary_intents。不要解释，不要输出 Markdown。
@@ -543,7 +576,7 @@ def predict_intent(e_title, e_content):
 
     try:
         response = ai_client.chat.completions.create(
-            model="deepseek-v4-flash",  # 或者您使用的其他模型
+            model=AI_MODEL,
             messages=[
                 {"role": "system", "content": router_prompt},
                 {"role": "user", "content": f"邮件标题:{e_title}\n\n邮件正文:{e_content}\n\n请输出JSON:"}
@@ -605,9 +638,10 @@ def generate_draft_reply(e_title, e_content, router_result):
         return "NO_REPLY"
 
     global_rules = load_global_rules()
-    response_guard = load_response_guard()
     entity_rules = load_entity_rules()
     module_context = build_skill_context(router_result)
+    # 注：response_guard.md 定位是"发送前质检清单"，现改为在 Stage 4 Reviewer 阶段使用
+    # (审核标准更贴近文件本身的设计意图)，草稿阶段不再重复注入，减少 prompt 体积。
 
     # --------------------------------------------------------
     # [核心修改] 获取 RAG 数据
@@ -667,6 +701,8 @@ def generate_draft_reply(e_title, e_content, router_result):
          - [具体数字 或 Available] units of [100%照抄底层的箱型箱况] on-ground at [严格复制堆场名] depot, at $[单价]/unit
        - 强制参考格式（完整版 - 仅当客户明确询问了对应参数时，才在末尾加上对应的括号）：
          - [具体数字 或 Available] units of [100%照抄底层的箱型箱况] on-ground at [严格复制堆场名] depot, at $[单价]/unit (Color: [颜色说明], YOM: [年份])
+         **【租赁剥离声明】：**如果客户同时询问了购买和租赁，请在报价前礼貌且明确地声明 Hysun 仅提供集装箱销售业务，不提供租赁服务。然后再顺势给出购买的报价。
+        参考话术："Please note that Hysun strictly focuses on container sales and we do not offer leasing services. However, regarding your purchase request..."
 
         ========================
         【全局规则】
@@ -674,9 +710,6 @@ def generate_draft_reply(e_title, e_content, router_result):
 
         【实体识别规则】
         {entity_rules}
-
-        【回复安全控制】
-        {response_guard}
 
         【业务SOP】
         {module_context}
@@ -696,8 +729,7 @@ def generate_draft_reply(e_title, e_content, router_result):
     第二步：【洞察隐藏属性】强制检索原邮件（包含引用的历史邮件），找出客户提及的颜色（如 RAL1015 = Light ivory, RAL7015 = Slate grey），以此作为匹配标准。
     第三步：【执行报价防守】如果客户目标价过低，礼貌拒绝该价格。
     第四步：【精选替代方案】从 RAG 数据中，优先挑选与客户历史颜色匹配的现货；若无颜色要求，则强制挑选同箱型中**价格最低**的 1-2 个选项！绝对禁止罗列全部数据！
-    第五步：【套用格式锁】只要客户提到了 color 或 YOM，列出选项时必须 100% 遵守以下完整格式（严禁漏掉括号内的属性）：
-    - [Available] units of [100%照抄底层的箱型箱况] on-ground at [严格复制堆场名] depot, at $[单价]/unit (Color: [颜色说明], YOM: [年份])
+    第五步：【套用格式锁】只要客户提到了 color 或 YOM，列出选项时必须 100% 遵守上方第10条"强制输出格式锁"的【完整版】格式，不得漏掉括号内的属性。
     ========================
         生成要求：
         1. 只输出邮件正文。禁止解释、Markdown 及分析过程。
@@ -707,7 +739,7 @@ def generate_draft_reply(e_title, e_content, router_result):
 
     try:
         response = ai_client.chat.completions.create(
-            model="deepseek-v4-flash",
+            model=AI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"邮件标题:{e_title}\n\n邮件正文:{e_content}\n\n请生成回复。"}
@@ -731,30 +763,30 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
         else:
             return False, "Generated NO_REPLY but Router indicated REPLY"
 
-    review_prompt = """你是 Hysun 企业的邮件质量审核专家 (Response Guard)。
+    response_guard = load_response_guard()
+
+    review_prompt = f"""你是 Hysun 企业的邮件质量审核专家 (Response Guard)。
     你的任务是严格审查 AI 生成的邮件草稿是否符合企业合规要求，并决定是否可以直接发送给客户。
 
-    审核标准 (致命错误)：
-    1. 错误处理非客户邮件：当前系统仅限回复客户(Customer)。
-       -> 【身份界定】：向我们询价、寻找箱子 (looking for containers)、要求我们提供报价 (send us your price/offer) 的都是【客户】，属于合法业务！只有当发件人是向我们索要欠款、发送发票(invoice)的供应商，或是要佣金的中介时，才必须 FAIL！
-    2. 错误处理无需回复：如果是自动通知/营销邮件，AI没有输出 NO_REPLY。
-    3. 遗漏核心问题：草稿完全没有提及原邮件中的主要请求。
-       -> 【重要例外声明】：如果草稿中说明了“正在与内部团队确认 (checking with our team)”、“内部审核中 (reviewing internally)”，或者“追问了缺失信息（如确认数量）”，这属于完全合规的业务防守，绝对不属于遗漏请求！
-    4. 虚假承诺：承诺了原邮件中不存在的付款完成、放箱完成或具体日期。
-    5. 高危操作：未经授权确认了银行信息更改。
-    6. 捏造数据：捏造了不存在的价格、金额、提单号或集装箱号。
-    7. 越权决策：擅自同意退款、打折或承担额外费用。
+    ========================
+    【权威审核标准】(以第13条 Final Reviewer Checklist 为最终判定依据)
+    {response_guard}
+    ========================
+
+    【业务补充说明】(response_guard.md 未覆盖、但同样重要的判定细节)
+    1. 【身份界定】：向我们询价、寻找箱子 (looking for containers)、要求我们提供报价 (send us your price/offer) 的都是【客户】，属于合法业务！只有当发件人是向我们索要欠款、发送发票(invoice)的供应商，或是要佣金的中介时，才必须 FAIL。
+    2. 【遗漏核心问题的例外】：如果草稿中说明了"正在与内部团队确认 (checking with our team)"、"内部审核中 (reviewing internally)"，或者"追问了缺失信息（如确认数量）"，这属于完全合规的业务防守，绝对不属于遗漏请求。
 
     必须严格输出 JSON 格式：
-    {
+    {{
       "status": "PASS", // 或者 "FAIL"
-      "feedback": "如果 FAIL，请用一句话指出具体违反了哪条标准，并给出修改建议。如果 PASS，则输出空字符串。"
-    }
+      "feedback": "如果 FAIL，请用一句话指出具体违反了 response_guard.md 的哪一条标准，并给出修改建议。如果 PASS，则输出空字符串。"
+    }}
     """
 
     try:
         response = ai_client.chat.completions.create(
-            model="deepseek-v4-flash",
+            model=AI_MODEL,
             messages=[
                 {"role": "system", "content": review_prompt},
                 {"role": "user",
@@ -916,7 +948,7 @@ def process_pending_emails():
 
 
 # ==========================================================
-# 10. 粘贴测试模式
+# 11. 粘贴测试模式
 # ==========================================================
 def test_static_email():
     print("\n" + "=" * 80)
@@ -926,38 +958,21 @@ def test_static_email():
     # --------------------------------------------------
     # ↓↓↓ 请在此处直接粘贴您的测试邮件标题和正文 ↓↓↓
     # --------------------------------------------------
-    title = "Re: HYSUN: PI No.HM599-042-2607M of 1X20DC RAL1015/1X20DC DD RAL7015 New 1 trip, POL: Dallas."
+    title = "Container Procurement"
 
     content = """
-  Thanks. I also need two 40’ HC cw at $1,500 each. Is there a way by chance to get the same color matching. Color isn’t important. If not it’s ok I still need them. Thank you. ~Nick
+  Dear Alfy,
+Good day!
+My name is Fezan from Waterlink Group of Companies. We are a logistics and supply-chain group based in Karachi, Pakistan, operating businesses including bunkering, on-dock and off-dock CFS facilities, freight forwarding, and other maritime services.
 
+We are looking to purchase and/or lease approximately 50 dry containers—30 x 20’ GP and 20 x 40’ HC. Please share your current availability and best ex-depot prices in Karachi. We would also consider ex-China or Colombo where availability or pricing is better. Please quote new/one-trip and used cargo-worthy units separately.
+For Karachi stock, kindly confirm whether the containers are duty paid with complete ownership documents/NOC, or available for international SOC movement under the applicable bond arrangement.
+Please also mention the make, year, CSC validity, depot location, lift-on charges, payment terms and quote validity.
+If you recommend another location offering better availability or value, please let me know.
 
-On Thu, Jul 30, 2026 at 2:22 AM Hysun Support <support@hysuncontainer.com> wrote:
+Looking forward to your reply 
 
-Dear Nick,
-
- Good day.
-
- Could you kindly review the enclosed is PI No.HM599-042-2607M of 1X20DC RAL1015/1X20DC DD RAL7015 New 1 trip, POL: Dallas.
-
- Meantime, it is high appreciated for sharing the bank slip when you finish the payment.
-
- Any problem, pls feel free to contact me.
-
- Reminder: All invoices are valid for 3 days. If you need an extension, feel free to contact us. 
-
- Best Regards 
-	Jia Liu
- 			Senior Operation
-
-Mail: support@hysuncontainer.com
- 			Web: www.hysuncontainer.com
-Hysun ECO Container  Co.,Ltd
- 			HK Add: RM509, 5/F, The Cloud, 111 Tung Chau Street, Tai Kok Tsui, Kowloon, Hongkong
- 			CN Add: Room W1-619, Global Center, 1700# North Tianfu Av, Chengdu City, China(610041)
- 			GE Add: Am Hohenberg 27, 27711 OHZ，Niedersachsen，Germany(27711)
-***Hysun team offer 7*24 online customer service, pls copy mail to support@hysuncontainer.com if any help needed or inquiry***
- ***Hysun Team offer containers trade and storage service in CN and Asia, USA, CA, EU, and stock in Africa and South America***
+Kind regards,
     """
     # --------------------------------------------------
 
@@ -976,7 +991,7 @@ Hysun ECO Container  Co.,Ltd
 
 
 # ==========================================================
-# 11. 程序入口
+# 12. 程序入口
 # ==========================================================
 if __name__ == "__main__":
     print("================================")

@@ -8,7 +8,6 @@ RELEASE_STATUS_CHECK
 OWNERSHIP_TRANSFER_TRACKING
 DOCUMENT_REQUEST
 
-
 ## Global Processing Rule
 
 如果邮件包含历史thread：
@@ -24,11 +23,9 @@ DOCUMENT_REQUEST
 - 收费说明
 - 历史无关内容
 
-
 如果无法确认最新请求：
 
 不要回复。
-
 
 ---
 
@@ -42,13 +39,11 @@ DOCUMENT_REQUEST
 - pickup
 - release status
 
-
 ## AI Objective
 
 确认状态。
 
 禁止虚构release。
-
 
 ## Required Information
 
@@ -58,18 +53,15 @@ DOCUMENT_REQUEST
 - PI number
 - container number
 
-
 ## Allowed
 
 如果系统已有：
 
 提供release信息。
 
-
 如果没有：
 
 说明正在查询。
-
 
 ## Forbidden
 
@@ -80,7 +72,6 @@ DOCUMENT_REQUEST
 "The release has been sent."
 
 除非确认。
-
 
 ---
 
@@ -94,7 +85,6 @@ DOCUMENT_REQUEST
 - Depot地址
 - Container return location
 
-
 回复：
 
 必须：
@@ -104,11 +94,9 @@ DOCUMENT_REQUEST
 3. 不确认已经有效
 4. 不承诺完成时间
 
-
 推荐：
 
 "We have received the depot information and will verify it internally."
-
 
 ---
 
@@ -122,14 +110,11 @@ DOCUMENT_REQUEST
 
 "Pickup will be on [date]."
 
-
 除非系统确认。
-
 
 推荐：
 
 "We will confirm the pickup schedule internally and update you accordingly."
-
 
 ---
 
@@ -139,13 +124,11 @@ DOCUMENT_REQUEST
 
 客户询问ownership transfer。
 
-
 ## Required
 
 - container number
 - release code
 - pickup date
-
 
 ## Forbidden
 
@@ -154,7 +137,6 @@ DOCUMENT_REQUEST
 确认transfer completed。
 
 除非有记录。
-
 
 ---
 
@@ -168,12 +150,10 @@ DOCUMENT_REQUEST
 - certificate
 - inspection document
 
-
 ## AI Objective
 
 确认文件需求。
 内部获取。
-
 
 ## Forbidden
 
@@ -184,7 +164,6 @@ DOCUMENT_REQUEST
 禁止：
 
 保证一定提供。
-
 
 ## Template
 
@@ -199,7 +178,6 @@ Could you please confirm the container number or release code?
 Best regards,
 Hysun Operations Team
 
-
 ---
 
 # Short Pickup Schedule Notification
@@ -213,23 +191,19 @@ Hysun Operations Team
 - Schedule #
 - Depot
 
-
 处理：
 
 确认收到：
 
 schedule/depot信息。
 
-
 禁止：
 
 确认pickup日期。
 
-
 禁止：
 
 确认release。
-
 
 推荐：
 

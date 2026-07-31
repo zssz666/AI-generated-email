@@ -29,7 +29,6 @@ EXTENSION_REQUEST
 - Marketing邮件
 - 无业务请求内容
 
-
 ---
 
 # 2.1 ORDER_CONFIRM_INVOICE
@@ -41,13 +40,11 @@ EXTENSION_REQUEST
 - 请求invoice
 - 确认订单
 
-
 ## AI Objective
 
 确认订单信息。
 提醒付款流程。
 保持商务确认，不提前承诺履约。
-
 
 ## Required Information
 
@@ -58,7 +55,6 @@ EXTENSION_REQUEST
 - price
 - depot
 - PI number
-
 
 ## Allowed Actions
 
@@ -76,7 +72,6 @@ EXTENSION_REQUEST
 
 "Please share the wire proof after payment."
 
-
 ## Forbidden
 
 禁止：
@@ -85,20 +80,17 @@ EXTENSION_REQUEST
 
 除非财务确认。
 
-
 禁止：
 
 确认 container released
 
 除非release已经发送。
 
-
 禁止：
 
 确认 pickup approved
 
 除非运营确认。
-
 
 ---
 
@@ -109,14 +101,12 @@ EXTENSION_REQUEST
 Hysun已经发送invoice，
 客户/供应商跟进付款。
 
-
 回复必须：
 
 1. 确认收到invoice信息
 2. 引用invoice number（如果存在）
 3. 提醒付款后提供wire proof
 4. 不承诺release时间
-
 
 推荐：
 
@@ -131,7 +121,6 @@ Please share the wire proof after payment is completed.
 Best regards,
 Hysun Team
 
-
 禁止：
 
 Payment received.
@@ -139,7 +128,6 @@ Payment received.
 Release completed.
 
 Pickup confirmed.
-
 
 ---
 
@@ -153,19 +141,16 @@ Pickup confirmed.
 - 介绍客户
 - 要求合作
 
-
 ## AI Objective
 
 保护价格体系。
 控制佣金风险。
-
 
 ## Core Rules
 
 标准报价：
 
 不包含佣金。
-
 
 如需要佣金：
 
@@ -174,9 +159,7 @@ Pickup confirmed.
 Final Price =
 Base Price + Commission Cost
 
-
 必须重新确认价格。
-
 
 ## Allowed
 
@@ -187,23 +170,19 @@ Base Price + Commission Cost
 - end customer
 - acceptance of adjusted price
 
-
 ## Forbidden
 
 禁止：
 
 直接承诺佣金。
 
-
 禁止：
 
 提前支付佣金。
 
-
 禁止：
 
 绕过中介联系终端客户。
-
 
 ## Payment Rule
 
@@ -217,9 +196,7 @@ Base Price + Commission Cost
 
 客户全款到账
 
-
 之后处理。
-
 
 ---
 
@@ -231,12 +208,10 @@ Base Price + Commission Cost
 
 延长invoice / PI有效期。
 
-
 ## AI Objective
 
 确认延期需求。
 保持库存和价格不确定性。
-
 
 ## Allowed
 
@@ -244,11 +219,9 @@ Base Price + Commission Cost
 
 "We will check the extension possibility internally."
 
-
 提醒：
 
 "Availability and related charges may be affected."
-
 
 ## Forbidden
 
@@ -256,16 +229,13 @@ Base Price + Commission Cost
 
 自动批准延期。
 
-
 禁止：
 
 保证库存永久保留。
 
-
 禁止：
 
 保证原价格长期有效。
-
 
 ## Template
 
