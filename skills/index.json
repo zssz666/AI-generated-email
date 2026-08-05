@@ -281,70 +281,24 @@
 
   ],
 
-
-
-  "router_output_schema": {
-
-
-    "primary_intent":
-
-    "string",
-
-
-    "secondary_intents": [
-
-      "string"
-
-    ],
-
-
-    "action":
-
-    "REPLY/NO_REPLY",
-
-
+ "router_output_schema": {
+    "primary_intent": "string",
+    "secondary_intents": ["string"],
+    "action": "REPLY/NO_REPLY",
     "entities": {
-
-
-      "container_type":
-
-      "string",
-
-
-      "container_number":
-
-      "string",
-
-
-      "invoice_number":
-
-      "string",
-
-
-      "pi_number":
-
-      "string",
-
-
-      "release_code":
-
-      "string",
-
-
-      "company_role":
-
-      "customer/vendor/intermediary",
-      "target_location": "string"
-
+        "container_type": "string",
+        "requested_color": "string",
+        "requested_condition": "string",
+        "container_number": "string",
+        "invoice_number": "string",
+        "pi_number": "string",
+        "release_code": "string",
+        "company_role": "customer/vendor/intermediary",
+        "target_location": "string",
+        "sender_name": "string"
     },
-
-
-    "risk_level":
-
-    "LOW/MEDIUM/HIGH"
-
-
-  }
+    "risk_level": "LOW/MEDIUM/HIGH"
+}
 
 
 }

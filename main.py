@@ -1,14 +1,18 @@
 import json
 import os
+import re
+import time
+import traceback
 from functools import lru_cache
-
 import pymysql
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from dotenv import load_dotenv
 from openai import OpenAI
 
 # ==========================================================
-# 1. 环境配置
+# 1. 环境配置 & 全局连接池优化
 # ==========================================================
 load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -16,12 +20,16 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 ai_client = OpenAI(
     api_key=DEEPSEEK_API_KEY,
-    base_url=DEEPSEEK_BASE_URL
+    base_url=DEEPSEEK_BASE_URL,
+    timeout=45.0  # 🚨 【核心防挂死】设置 45 秒硬超时，拒绝无限等待
 )
 
-# 统一模型常量：原代码中同一个模型名被硬编码了 3 次（Router/Drafter/Reviewer），
-# 后续升级模型只需改这一处。如果不同阶段需要不同模型，可以拆成三个常量。
 AI_MODEL = "deepseek-v4-flash"
+
+# 🚨 极速优化：建立全局连接池，避免每次请求都进行 TCP 三次握手
+global_session = requests.Session()
+retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504])
+global_session.mount('http://', HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
 
 # ==========================================================
 # 2. 数据库配置
@@ -42,12 +50,8 @@ SKILLS_DIR = os.path.join(BASE_DIR, "skills")
 
 
 # ==========================================================
-# 3. Skill系统加载
+# 3. Skill系统加载与动态缓存
 # ==========================================================
-# 规则文件在服务运行期间基本不会变化（不像库存/城市/箱型是动态数据），
-# 之前的实现是每处理一封邮件就把 index.json 和所有 .md 文件重新读一遍磁盘。
-# 这里用 lru_cache 缓存，和下面 fetch_system_* 系列的缓存模式保持一致。
-# 如果规则文件会被热更新，调用 reload_skill_cache() 清空缓存即可。
 @lru_cache(maxsize=1)
 def get_index_config():
     path = os.path.join(SKILLS_DIR, "index.json")
@@ -63,218 +67,120 @@ def get_index_config():
 def load_skill_file(filename):
     path = os.path.join(SKILLS_DIR, filename)
     if not os.path.exists(path):
-        print(f"[Skill不存在] {path}")
         return ""
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
-def reload_skill_cache():
-    """规则文件热更新后调用，清空缓存重新读取磁盘。"""
-    get_index_config.cache_clear()
-    load_skill_file.cache_clear()
-
-
 def load_global_rules():
-    cfg = get_index_config()
-    return load_skill_file(cfg.get("global_rules_file", "global_rules.md"))
+    return load_skill_file(get_index_config().get("global_rules_file", "global_rules.md"))
 
 
 def load_response_guard():
-    cfg = get_index_config()
-    return load_skill_file(cfg.get("response_guard_file", "response_guard.md"))
+    return load_skill_file(get_index_config().get("response_guard_file", "response_guard.md"))
 
 
 def load_entity_rules():
-    cfg = get_index_config()
-    return load_skill_file(cfg.get("entity_rules_file", "entity_rules.md"))
+    return load_skill_file(get_index_config().get("entity_rules_file", "entity_rules.md"))
 
 
 def load_module(module_path):
     return load_skill_file(module_path)
 
-# 全局缓存系统城市列表，避免每次请求都去查数据库
+
 SYSTEM_CITIES_CACHE = []
+_FETCHED_CITIES = False
+
 
 def fetch_system_cities():
-    """
-    调用后端的 ListDepot 接口，获取系统中所有支持的唯一城市列表 (对标前端 getCitys)
-    """
-    global SYSTEM_CITIES_CACHE
-    # 如果缓存里已经有了，直接返回，节约性能
-    if SYSTEM_CITIES_CACHE:
-        return SYSTEM_CITIES_CACHE
-
-    # 替换成您真实的 ListDepot 完整接口地址
-    # 注意：根据您的实际部署情况修改 IP 或域名
-    api_url = "http://47.109.176.188:81/ListDepot"
-
+    global SYSTEM_CITIES_CACHE, _FETCHED_CITIES
+    if _FETCHED_CITIES: return SYSTEM_CITIES_CACHE
+    _FETCHED_CITIES = True  # 无论成功失败，本轮只请求一次
     try:
-        response = requests.get(api_url, timeout=5)
+        response = global_session.get("http://47.109.176.188:81/ListDepot", timeout=3)
         if response.status_code == 200:
-            data = response.json()
-            # 假设返回的数据结构是 { "obj": [ {"dCity": "Shanghai", ...}, ... ] }
-            depot_list = data.get("obj", [])
-
-            # Python 版本的去重 (对应您 JS 的 reduce)
-            unique_cities = set()
-            for item in depot_list:
-                city = item.get("dCity")
-                if city:
-                    unique_cities.add(city.strip())
-
-            # 转为列表并排序
+            depot_list = response.json().get("obj", [])
+            unique_cities = {item.get("dCity").strip() for item in depot_list if item.get("dCity")}
             SYSTEM_CITIES_CACHE = sorted(list(unique_cities))
-            print(f"✅ [系统启动] 成功同步系统城市字典，共 {len(SYSTEM_CITIES_CACHE)} 个城市。")
-            return SYSTEM_CITIES_CACHE
     except Exception as e:
-        print(f"❌ [系统告警] 获取城市列表失败: {e}")
+        print(f"[字典警告] 城市字典加载失败: {e}")
+    return SYSTEM_CITIES_CACHE
 
-    return []
 
-
-# 全局缓存系统国家列表 (格式: [{"ISO2": "TR", "eName": "Turkey", "cName": "土耳其"}, ...])
 SYSTEM_COUNTRIES_CACHE = []
+_FETCHED_COUNTRIES = False
 
 
 def fetch_system_countries():
-    """
-    调用后端的 /getGcountry 接口，动态同步国家字典 (对标前端 getCountryList)
-    """
-    global SYSTEM_COUNTRIES_CACHE
-    if SYSTEM_COUNTRIES_CACHE:
-        return SYSTEM_COUNTRIES_CACHE
-
-    api_url = "http://47.109.176.188:81/getGcountry"  # 替换为完整的后端接口地址
-
+    global SYSTEM_COUNTRIES_CACHE, _FETCHED_COUNTRIES
+    if _FETCHED_COUNTRIES: return SYSTEM_COUNTRIES_CACHE
+    _FETCHED_COUNTRIES = True
     try:
-        response = requests.get(api_url, timeout=5)
+        response = global_session.get("http://47.109.176.188:81/getGcountry", timeout=3)
         if response.status_code == 200:
-            data = response.json()
-            # 兼容接口返回的数据结构
-            country_list = data.get("obj", [])
-
-            valid_countries = []
-            for item in country_list:
-                iso2 = item.get("ISO2", "").strip().upper()
-                ename = item.get("eName", "").strip()
-                cname = item.get("cName", "").strip()
-                if iso2 and ename:
-                    valid_countries.append({
-                        "ISO2": iso2,
-                        "eName": ename,
-                        "cName": cname
-                    })
-
-            SYSTEM_COUNTRIES_CACHE = valid_countries
-            print(f"✅ [系统启动] 成功同步系统国家字典，共 {len(SYSTEM_COUNTRIES_CACHE)} 个国家。")
-            return SYSTEM_COUNTRIES_CACHE
-    except Exception as e:
-        print(f"❌ [系统告警] 获取国家列表失败: {e}")
-
-    return []
+            country_list = response.json().get("obj", [])
+            SYSTEM_COUNTRIES_CACHE = [
+                {"ISO2": item.get("ISO2", "").strip().upper(), "eName": item.get("eName", "").strip(),
+                 "cName": item.get("cName", "").strip()}
+                for item in country_list if item.get("ISO2") and item.get("eName")
+            ]
+    except Exception:
+        pass
+    return SYSTEM_COUNTRIES_CACHE
 
 
-# 全局缓存系统箱型列表：{"40hcos4d": "31", ...} 用于"箱型文字 -> id"编码(询价时反查库存)
 SYSTEM_CONTAINER_TYPES_CACHE = {}
-# 反向缓存：{"31": "40HC OS 4D", ...} 用于"id -> 箱型文字"解码(读库存返回的SKU时使用)
-# 与下面 HYSUN_CONTAINER_TYPES 是同一份业务数据的两个方向，之前分别维护一份动态、一份硬编码，
-# 存在两处数据不同步的风险；这里让两者共用同一次接口调用的结果，硬编码表降级为接口异常时的兜底。
 SYSTEM_CONTAINER_ID_TO_NAME_CACHE = {}
+_FETCHED_TYPES = False
 
 
 def fetch_system_container_types():
-    """
-    调用后端的 /getAllBoxServlet 接口，动态同步箱型字典 (对标前端 getBoxPile)
-    返回字典格式: {"40hcos4d": "31", "20dc": "03", "40hc": "25", ...}
-    """
-    global SYSTEM_CONTAINER_TYPES_CACHE, SYSTEM_CONTAINER_ID_TO_NAME_CACHE
-    if SYSTEM_CONTAINER_TYPES_CACHE:
-        return SYSTEM_CONTAINER_TYPES_CACHE
-
-    api_url = "http://47.109.176.188:81/getAllBoxServlet"  # 请确保替换为真实的完整后端地址
-
+    global SYSTEM_CONTAINER_TYPES_CACHE, SYSTEM_CONTAINER_ID_TO_NAME_CACHE, _FETCHED_TYPES
+    if _FETCHED_TYPES: return SYSTEM_CONTAINER_TYPES_CACHE
+    _FETCHED_TYPES = True
     try:
-        response = requests.get(api_url, timeout=5)
+        response = global_session.get("http://47.109.176.188:81/getAllBoxServlet", timeout=3)
         if response.status_code == 200:
-            data = response.json()
-            box_list = data.get("obj", [])
-
-            valid_boxes = {}
-            id_to_name = {}
+            box_list = response.json().get("obj", [])
             for item in box_list:
-                # 提取 id 和 箱型代码 (例如 id: 31, code: "40HC OS 4D")
-                raw_id = item.get("id")
-                raw_code = item.get("code", "")
-
+                raw_id, raw_code = item.get("id"), item.get("code", "")
                 if raw_id is not None and raw_code:
-                    # 将 id 转为 2 位数格式，比如 3 -> "03", 31 -> "31"
                     box_id = str(raw_id).zfill(2)
-
-                    # 极度清洗箱型名字：转小写，去空格，去单引号
                     clean_code = raw_code.lower().replace("'", "").replace(" ", "").replace("-", "")
-
-                    # 存入字典 {"40hcos4d": "31"}
-                    valid_boxes[clean_code] = box_id
-                    # 反向存入原始可读名字 {"31": "40HC OS 4D"}，用于解码展示
-                    id_to_name[box_id] = raw_code.strip()
-
-            SYSTEM_CONTAINER_TYPES_CACHE = valid_boxes
-            SYSTEM_CONTAINER_ID_TO_NAME_CACHE = id_to_name
-            print(f"✅ [系统启动] 成功同步系统箱型字典，共 {len(SYSTEM_CONTAINER_TYPES_CACHE)} 种箱型。")
-            return SYSTEM_CONTAINER_TYPES_CACHE
-    except Exception as e:
-        print(f"❌ [系统告警] 获取箱型列表失败: {e}")
-
-    return {}
+                    SYSTEM_CONTAINER_TYPES_CACHE[clean_code] = box_id
+                    SYSTEM_CONTAINER_ID_TO_NAME_CACHE[box_id] = raw_code.strip()
+    except Exception:
+        pass
+    return SYSTEM_CONTAINER_TYPES_CACHE
 
 
-# 全局缓存系统颜色列表
 SYSTEM_COLORS_CACHE = {}
+_FETCHED_COLORS = False
 
 
 def fetch_system_colors():
-    """
-    调用后端的 getAllColorServlet 接口，动态同步颜色字典。
-    """
-    global SYSTEM_COLORS_CACHE
-    if SYSTEM_COLORS_CACHE:
-        return SYSTEM_COLORS_CACHE
-
-    # 【已修复】直接使用你之前的硬编码完整地址
-    api_url = "http://47.109.176.188:81/getAllColorServlet"
-
+    global SYSTEM_COLORS_CACHE, _FETCHED_COLORS
+    if _FETCHED_COLORS: return SYSTEM_COLORS_CACHE
+    _FETCHED_COLORS = True
     try:
-        response = requests.get(api_url, timeout=5)
+        response = global_session.get("http://47.109.176.188:81/getAllColorServlet", timeout=3)
         if response.status_code == 200:
             color_list = response.json().get("obj", [])
             for item in color_list:
-                # 获取接口返回的真实字段名
                 color_code = item.get("color_code", item.get("str", ""))
                 enname = item.get("color_en", item.get("enname", ""))
-
-                # 处理特殊的硬编码颜色
                 if color_code == "0000":
                     enname = "Mixed"
                 elif color_code == "8888":
                     enname = "Camo"
                 elif color_code == "0001":
                     enname = "5010/6032"
+                if color_code: SYSTEM_COLORS_CACHE[color_code] = enname
+    except Exception:
+        pass
+    return SYSTEM_COLORS_CACHE
 
-                if color_code:
-                    SYSTEM_COLORS_CACHE[color_code] = enname
 
-            print(f"✅ [系统启动] 成功同步系统颜色字典，共 {len(SYSTEM_COLORS_CACHE)} 种颜色。")
-            return SYSTEM_COLORS_CACHE
-    except Exception as e:
-        print(f"❌ [系统告警] 获取颜色列表失败: {e}")
-
-    return {}
-# ==========================================================
-# 内部编码与解码映射库
-# ==========================================================
-# 兜底表：仅在 /getAllBoxServlet 接口不可用时使用，正常情况下解码优先走
-# SYSTEM_CONTAINER_ID_TO_NAME_CACHE（与编码用的是同一份接口数据，天然保持同步）。
 HYSUN_CONTAINER_TYPES_FALLBACK = {
     1: "10DC", 2: "10HC", 3: "20DC", 4: "20DC RF", 5: "20DC DD", 6: "20DC OS FOS",
     7: "20DC OS 2D", 8: "20DC OS 4D", 9: "20DC HT", 10: "20DC OT", 11: "20DC FR",
@@ -287,112 +193,63 @@ HYSUN_CONTAINER_TYPES_FALLBACK = {
     40: "45HC DD", 41: "45HC FR", 42: "45HC PW", 43: "53HC"
 }
 
-# 根据实际业务逻辑与系统编码严格映射的箱况字典
 HYSUN_CONDITIONS = {
-    1: "NEW",        # 出厂新箱 (特指：中国境内交货的全新箱)
-    2: "New 1 trip", # 出厂1次转运新箱 (特指：海外交货的新箱)
-    3: "New-IICL",   # 极优旧箱 (约使用2-9次)
-    4: "IICL",       # 优质旧箱 (使用10次以上)
-    5: "CW",         # 标准旧箱 (Cargo Worthy)
-    6: "CW-WWT",     # 不漏风不漏水
-    7: "WWT",        # 无破洞箱
-    8: "ASIS",       # 现况箱
-    9: "CW+"         # 优质旧箱 (状态优于普通CW)
+    1: "NEW", 2: "New 1 trip", 3: "New-IICL", 4: "IICL", 5: "CW",
+    6: "CW-WWT", 7: "WWT", 8: "ASIS", 9: "CW+"
 }
 
 
 def parse_hysun_idcode(idcode: str):
-    """解码 Java 返回的 10 位 SKU，提取颜色、箱型与箱况"""
-    if not idcode or len(idcode) != 10 or not idcode.isdigit():
-        return "未知规格"
-
-    # 截取前 4 位作为颜色码
-    color_code = idcode[0:4]
-    type_id = int(idcode[4:6])
-    cond_id = int(idcode[6:7])
-
-    # 优先用接口动态数据解码(与编码共享同一份数据，不会跑偏)，查不到再退回硬编码兜底表
-    fetch_system_container_types()  # 确保动态字典已加载(命中缓存则直接返回)
-    box_type = SYSTEM_CONTAINER_ID_TO_NAME_CACHE.get(str(type_id).zfill(2)) \
-        or HYSUN_CONTAINER_TYPES_FALLBACK.get(type_id, f"Type-{type_id}")
+    if not idcode or len(idcode) != 10 or not idcode.isdigit(): return "未知规格"
+    color_code, type_id, cond_id = idcode[0:4], int(idcode[4:6]), int(idcode[6:7])
+    fetch_system_container_types()
+    box_type = SYSTEM_CONTAINER_ID_TO_NAME_CACHE.get(str(type_id).zfill(2)) or HYSUN_CONTAINER_TYPES_FALLBACK.get(
+        type_id, f"Type-{type_id}")
     box_cond = HYSUN_CONDITIONS.get(cond_id, f"Cond-{cond_id}")
-
-    # 动态匹配颜色英文名
-    colors_map = fetch_system_colors()
-    box_color_en = colors_map.get(color_code, "")
-
-    # 如果有颜色，就拼接到规格后面；如果没有匹配到，就留空
+    box_color_en = fetch_system_colors().get(color_code, "")
     color_desc = f" | 🎨 颜色: {box_color_en}" if box_color_en else ""
-
     return f"{box_type} {box_cond}{color_desc}"
 
 
-def encode_search_idcode(raw_type):
-    """
-    智能动态箱型转码引擎：基于 getAllBoxServlet 接口动态抓取数据，
-    采用“最长优先匹配”杜绝截断漏洞。
-    """
-    if not raw_type:
-        return ""
+def encode_search_idcode(raw_type, color_param="", condition_param="", flp="_", lb="_", eod="_"):
+    if not raw_type: return ""
+    color_code = "____"
+    if color_param:
+        match = re.search(r'\d{4}', color_param)
+        if match: color_code = match.group()
 
-    # 1. 对客户传入的箱型进行极度清洗
-    desc = raw_type.lower().replace("'", "").replace(" ", "").replace("-", "")
+    type_code = "__"
+    desc = str(raw_type).lower().replace("'", "").replace(" ", "").replace("-", "")
+    desc = desc.replace("gp", "dc").replace("dv", "dc").replace("reefer", "rf").replace("opentop", "ot").replace(
+        "openside", "os").replace("doubledoor", "dd").replace("flatrack", "fr").replace("hardtop", "ht")
 
-    # 2. 统一别名容错 (防止大模型输出全拼，或者客户写了异形词)
-    desc = desc.replace("gp", "dc").replace("dv", "dc")
-    desc = desc.replace("reefer", "rf").replace("opentop", "ot").replace("openside", "os")
-    desc = desc.replace("doubledoor", "dd").replace("flatrack", "fr").replace("hardtop", "ht")
-
-    # 3. 动态获取系统最新箱型字典
     container_map = fetch_system_container_types()
-    if not container_map:
-        return ""  # 如果接口异常抓不到数据，这里会作为兜底
+    if container_map:
+        if desc in container_map:
+            type_code = container_map[desc]
+        else:
+            for key in sorted(container_map.keys(), key=len, reverse=True):
+                if key in desc:
+                    type_code = container_map[key]
+                    break
 
-    # 4. 第一层拦截：尝试完全匹配 (极速命中)
-    if desc in container_map:
-        return f"____{container_map[desc]}____"
+    condition_code = "_"
+    if condition_param:
+        cond_clean = condition_param.upper().replace(" ", "").replace("-", "")
+        reverse_cond_map = {"NEW": "1", "NEW1TRIP": "2", "1TRIP": "2", "ONEWAY": "2", "NEWIICL": "3", "IICL": "4",
+                            "CW": "5", "CARGOWORTHY": "5", "CWWWT": "6", "WWT": "7", "ASIS": "8", "CW+": "9"}
+        condition_code = reverse_cond_map.get(cond_clean, "_")
 
-    # 5. 第二层拦截：最长子串匹配 (防截断核心机制)
-    # 按字典中箱型名字的长度进行降序排序，先查长名字(如 40hcos4d)，再查短名字(如 40hc)
-    sorted_keys = sorted(container_map.keys(), key=len, reverse=True)
-    for key in sorted_keys:
-        if key in desc:
-            return f"____{container_map[key]}____"
-
-    return ""
-
-def get_area_code(location_str: str):
-    loc = location_str.lower()
-    if any(x in loc for x in ['us', 'usa', 'america', 'canada', 'houston', 'los angeles']): return 1
-    if any(x in loc for x in ['asia', 'china', 'shanghai', 'ningbo', 'qingdao']): return 2
-    if any(x in loc for x in ['europe', 'liverpool', 'manchester', 'antwerp', 'rotterdam']): return 3
-    return 0
+    return f"{color_code}{type_code}{condition_code}{flp}{lb}{eod}"
 
 
 def get_iso2_country_code(location_str: str):
-    """
-    通过系统接口拉取回来的国家字典，智能比对英文名、中文名或 ISO2，
-    返回 Java 接口需要的 List 格式，例如: ["TR"] 或 ["DK"]
-    """
-    if not location_str:
-        return []
-
+    if not location_str: return []
     loc_clean = location_str.strip().lower()
-    countries = fetch_system_countries()
-
-    for item in countries:
-        iso2 = item["ISO2"].lower()
-        ename = item["eName"].lower()
-        cname = item["cName"].lower()
-
-        # 1. 如果完全相等的比对 (如传入 "Turkey" 命中 ename)
-        # 2. 或者子串比对 (如传入 "Turkey, Mersin" 中包含 "turkey")
-        # 3. 甚至兼容直接传入缩写 "TR" 的情况
-        if loc_clean == ename or loc_clean == iso2 or loc_clean == cname:
+    for item in fetch_system_countries():
+        if loc_clean in (item["eName"].lower(), item["ISO2"].lower(), item["cName"].lower()) or (
+                len(item["eName"]) > 2 and item["eName"].lower() in loc_clean):
             return [item["ISO2"]]
-        if len(ename) > 2 and ename in loc_clean:
-            return [item["ISO2"]]
-
     return []
 
 
@@ -401,389 +258,351 @@ def get_iso2_country_code(location_str: str):
 # ==========================================================
 def query_internal_inventory(entities, email_content):
     api_url = os.getenv("INVENTORY_API_URL")
-
-    # 拿到形如 "40HC, 20DC, 40OT" 的字符串，按照逗号切分成列表
     raw_type_desc = entities.get("container_type", "")
     types_to_search = [t.strip() for t in raw_type_desc.replace('，', ',').split(',')] if raw_type_desc else [""]
-
+    requested_color = entities.get("requested_color", "")
+    requested_condition = entities.get("requested_condition", "")
     location_desc = entities.get("target_location", entities.get("release_code", "")).strip()
 
-    # ==========================================================
-    # 🌟 地理层级路由引擎（保持上一版的完美逻辑不变）
-    # ==========================================================
-    area_code = 0
-    country_codes = []
-    d_city_val = ""
     loc_lower = location_desc.lower()
-
     area_map = {'us & ca': 1, 'america': 1, 'us': 1, 'usa': 1, 'canada': 1, 'asia': 2, 'europe': 3, 'others': 4}
-    matched_area = area_map.get(loc_lower)
+    area_code = area_map.get(loc_lower, 0)
+    country_codes = [] if area_code else get_iso2_country_code(location_desc)
 
-    if matched_area:
-        area_code = matched_area
-    else:
-        country_codes = get_iso2_country_code(location_desc)
-        system_cities = fetch_system_cities()
-        matched_city = next((city for city in system_cities if city.lower() in loc_lower), "")
+    d_city_val = ""
+    if not area_code:
+        matched_city = next((city for city in fetch_system_cities() if city.lower() in loc_lower), "")
+        d_city_val = matched_city if matched_city else ("" if country_codes else location_desc)
 
-        if matched_city:
-            d_city_val = matched_city
-        elif len(country_codes) > 0:
-            d_city_val = ""
-        else:
-            d_city_val = location_desc
-
-    # ==========================================================
-    # 🌟 多箱型循环查询引擎
-    # ==========================================================
     inventory_text = "【内部系统实时库存底牌】\n"
     valid_count = 0
-
     headers = {"Content-Type": "application/json"}
 
-    # 遍历客户询问的每一种箱型，分别向 Java 发起精准检索
     for single_type in types_to_search:
         if not single_type: continue
-
-        search_idcode = encode_search_idcode(single_type)
-
-        payload = {
-            "idCodes": search_idcode,
-            "dCity": d_city_val,
-            "dCountry": country_codes,
-            "yardName": "",
-            "area": area_code,
-            "page": 1,
-            "limit": 5,  # 保证每种箱型都能各自获取前 5 条最优报价
-            "date": [], "resource": "", "cargo": "",
-            "xcHid": 0, "xcUid": 0, "raioxcHid": 0, "raioxcUid": 0, "inventory": 0
-        }
+        search_idcode = encode_search_idcode(raw_type=single_type, color_param=requested_color,
+                                             condition_param=requested_condition)
+        payload = {"idCodes": search_idcode, "dCity": d_city_val, "dCountry": country_codes, "yardName": "",
+                   "area": area_code, "page": 1, "limit": 5, "date": [], "resource": "", "cargo": "", "xcHid": 0,
+                   "xcUid": 0, "raioxcHid": 0, "raioxcUid": 0, "inventory": 0}
+        print(payload)
 
         try:
-            response = requests.post(api_url, json=payload, headers=headers, timeout=8)
-            if response.status_code == 200:
-                raw_text = response.text
-                if not raw_text.strip(): continue
-
-                try:
-                    res_json = response.json()
-                except Exception:
-                    continue
-
-                page_data = res_json.get("obj", {}).get("page", [])
-                if not page_data: continue
-
+            # 🚨 使用 global_session 替代 requests.post
+            response = global_session.post(api_url, json=payload, headers=headers, timeout=5)
+            if response.status_code == 200 and response.text.strip():
+                page_data = response.json().get("obj", {}).get("page", [])
                 # 遍历处理该箱型的返回数据 (0价格/数量拦截)
                 for item in page_data:
                     ddepot = item.get("ddepot", {})
-                    city = ddepot.get("dCity", "未知城市")
-                    country = ddepot.get("dCountry", "")
-                    yard = ddepot.get("dName", "")
-
+                    city, country, yard = ddepot.get("dCity", "未知城市"), ddepot.get("dCountry", ""), ddepot.get(
+                        "dName", "")
                     readable_desc = parse_hysun_idcode(item.get("idCode", ""))
-                    o_price, onground = item.get("oPrince", 0), item.get("onground", 0)
-                    u_price, upcoming, eta = item.get("uPrice", 0), item.get("upcoming", 0), item.get("eta", "")
 
-                    # 🌟 新增：安全提取 yom (年份) 字段
-                    raw_yom = str(item.get("yom", "")).strip()
+                    # 宽容度拉满的字段提取引擎 (应对后端驼峰/拼写差异)
+                    raw_oprice = item.get("oPrice") or item.get("oPrince") or item.get("price") or item.get(
+                        "Price") or 0
+                    # 如果没有独立的在途价格(uPrice)，就直接复用主价格
+                    raw_uprice = item.get("uPrice") or raw_oprice or 0
+
+                    o_price = float(raw_oprice)
+                    u_price = float(raw_uprice)
+
+                    onground = int(item.get("onground") or item.get("onGround") or item.get("Pick Up") or 0)
+                    upcoming = int(item.get("upcoming") or item.get("upComing") or item.get("UpComing") or 0)
+                    eta = str(item.get("eta") or item.get("ETA") or "").strip()
+
+                    # 安全提取 yom (年份) 字段
+                    raw_yom = str(item.get("yom") or item.get("YOM") or "").strip()
                     # 过滤掉空值、"0" 或 "None" 等无效年份
                     yom_desc = f" | 📅 年份: {raw_yom}" if raw_yom and raw_yom not in ["0", "None", "null"] else ""
 
                     has_valid_onground = (onground > 0 and o_price > 0)
                     has_valid_upcoming = (upcoming > 0 and u_price > 0)
 
-                    if not has_valid_onground and not has_valid_upcoming:
-                        continue
+                    # 如果既没有现货，也没有在途，才跳过这条数据
+                    if not has_valid_onground and not has_valid_upcoming: continue
 
                     stock_info = []
-                    if has_valid_onground: stock_info.append(f"现货(On-ground): {onground}个 (底价: ${o_price})")
-                    if has_valid_upcoming:
-                        eta_str = f", ETA: {eta}" if eta else ""
-                        stock_info.append(f"在途(Upcoming): {upcoming}个 (底价: ${u_price}{eta_str})")
+                    if has_valid_onground: stock_info.append(f"现货: {onground}个 (底价: ${o_price})")
+                    if has_valid_upcoming: stock_info.append(
+                        f"在途: {upcoming}个 (底价: ${u_price}{f', ETA: {eta}' if eta else ''})")
 
-                    stock_desc = " | ".join(stock_info)
-
-                    # 将 yom_desc 无缝拼接到喂给 AI 的底牌数据中
-                    inventory_text += f"- 📍 [{country}] {city} ({yard}) | 📦 规格: {readable_desc}{yom_desc} | {stock_desc}\n"
+                    inventory_text += f"- 📍 [{country}] {city} ({yard}) | 📦 规格: {readable_desc}{yom_desc} | {' | '.join(stock_info)}\n"
                     valid_count += 1
-
         except Exception as e:
-            print(f"[库存 API 调用异常] 箱型 {single_type}: {e}")
+            print(f"[库存 API 异常] 箱型 {single_type}: {e}")
 
-    # 如果所有箱型查完，一条有效数据都没有
-    if valid_count == 0:
-        return "【内部查询结果：当前区域暂无客户所求的匹配现货或在途库存，请致歉。】"
-
-    print("\n🤖 [API 成功联调] 喂给 AI 的综合库存底牌信息：\n" + inventory_text)
-    return inventory_text
+    return inventory_text if valid_count > 0 else "【内部查询结果：当前区域暂无客户所求的匹配现货或在途库存，请致歉。】"
 
 
 # ==========================================================
-# 4. Stage 1: Multi Intent Router
+# 4. Stage 1: Router
 # ==========================================================
 def predict_intent(e_title, e_content):
     cfg = get_index_config()
-    valid_intents = list(cfg.get("intent_to_module", {}).keys())
-
-    router_schema = cfg.get("router_output_schema", {})
-    non_business_cfg = cfg.get("non_business_config", {})
-    router_config = cfg.get("router_config", {})
-
-    # 🌟 动态系统城市列表
     valid_cities = fetch_system_cities()
     cities_str = ", ".join(valid_cities) if valid_cities else "Shanghai, Ningbo, Qingdao, Antwerp, Rotterdam"
 
-    # 之前 Router 阶段没有加载 entity_rules.md，只能靠一条简化的内联规则提取箱型/地点，
-    # 导致 Router 提取的实体(container_type等)比 Drafter 阶段掌握的规则要粗糙很多，
-    # 而后续的库存检索(query_internal_inventory)恰恰是直接用 Router 提取的实体去查询的。
-    # 这里把权威的实体识别规范一并交给 Router，删掉原来重复且更简陋的内联箱型规则。
-    entity_rules = load_entity_rules()
+    intent_keys = list(cfg.get("intent_to_module", {}).keys())
+    if not intent_keys:
+        intent_keys = ["STOCK_PRICE_INQUIRY", "NON_BUSINESS_EMAIL", "ORDER_CONFIRM_INVOICE"]
 
-    router_prompt = f"""你是Hysun企业邮件意图识别引擎。
-    你的任务：
-    分析邮件标题和正文，识别主要意图、次要意图、实体信息以及动作指令。
-    合法意图列表：
-    {json.dumps(valid_intents, ensure_ascii=False, indent=2)}
-    非业务邮件规则：
-    {json.dumps(non_business_cfg, ensure_ascii=False, indent=2)}
-    路由配置 (优先级与多意图限制)：
-    {json.dumps(router_config, ensure_ascii=False, indent=2)}
-    ========================
-【实体识别权威规范】(箱型字典、箱况黑话、标点豁免比对等均以此为准)
-    {entity_rules}
-========================
-【🚨 地理位置提取补充规则】(entity_rules.md 未包含的动态数据)
-    - 当前系统支持的标准城市列表：[{cities_str}]
-    - 【城市级】：强制对齐并纠错为上方列表中的标准拼写（如 Shangai -> Shanghai）。
-    - 【国家/大洲级】：直接提取英文名，绝对不可留空 ""！
-    - 完全未提及地点时才允许输出 ""。
-========================
+    router_prompt = f"""你是Hysun邮件意图与实体识别引擎。
 
-必须严格按照以下 JSON Schema 输出：
-{json.dumps(router_schema, ensure_ascii=False, indent=2)}
+    【📋 询盘 vs 非询盘判定标准（必须严格遵循）】
 
-规则：
-1. 【最高指令 - 身份拦截与豁免】：
-   - 只要对方在邮件中表达了"寻找、需求、购买"集装箱的意图（如 "I need...", "Looking for...", "purchase"），无论对方签名是采购经理(Purchasing)还是同行贸易公司，一律豁免，视为真实客户(Customer)！
-   - 只有当对方试图【向我们推销产品/服务】、【兜售空箱】或【催收账款】时，才判定为 NON_CUSTOMER_EMAIL，并强制输出 NO_REPLY！
-2. 🚨【最高指令 - 业务拦截与混合豁免】：
-   - 系统仅提供"销售(Sale)"业务。如果对方纯粹且仅仅询问"租赁(Lease/Rent)"，primary_intent 必须是 LEASE_INQUIRY，action 输出 NO_REPLY！
-   - 💡【混合豁免条款】：如果客户在邮件中同时提到了"购买 (Purchase/Buy)"和"租赁 (Lease/Rent)"（例如 "purchase and/or lease"），必须将其判定为真实的买家！primary_intent 设为 STOCK_PRICE_INQUIRY，并允许 action 输出 REPLY。绝对禁止因包含 lease 而误杀潜在买单！
-3. 非业务邮件(营销、平台通知) -> NON_BUSINESS_EMAIL -> NO_REPLY。
-4. 只有当确定对方是买家且询问买卖业务时，action 允许是 REPLY。
-5. 多请求放在 secondary_intents。不要解释，不要输出 Markdown。
+    **STOCK_PRICE_INQUIRY（询盘）** — 满足以下 **任意一条** 即判为询盘：
+    1. 邮件中明确指定了具体箱型（如 20GP、40HC、20DC、40'HC Used 等）
+    2. 邮件中明确询问了某地是否有可用集装箱（如 "available in Vancouver?"、"have stock in Houston?"、"any containers in Europe?"），即使未指定箱型
+    3. 邮件中明确指定了数量或地点，并带有采购意向词（need、looking for、quote、purchase、buy）
+    4. 邮件中明确询问价格（quote/price/cost）
+
+    **NON_BUSINESS_EMAIL（非询盘）** — 满足以下任意一条：
+    1. 仅索要"全部库存清单"或"最新库存表"，但未提及任何具体采购需求（无箱型、无地点、无数量）
+    2. 邮件内容仅为市场调研或供应商筛选，未体现具体采购场景
+    3. 纯粹的广告、营销、平台通知（如 xChange 通知）、LinkedIn 推广
+    4. 发票催款、对账、供应商付款等供应商侧业务
+
+    【🚨 最高优先级判定规则】
+    - 如果邮件中**出现了具体箱型名称**（无论是否附带地点/数量），**必须**判为 STOCK_PRICE_INQUIRY。
+    - 如果邮件**未出现箱型**，但**明确询问了某地的可用库存**（如 "what do you have in Houston?"），也**必须**判为 STOCK_PRICE_INQUIRY。
+    - 只有**既无箱型、也无地点询问、仅索要清单**的，才判为 NON_BUSINESS_EMAIL。
+
+    【实体提取规范】
+    {load_entity_rules()}
+    - 颜色/箱况：明确指定的颜色(如RAL1015)存入requested_color；明确指定的新旧(如1TRIP, CW)存入requested_condition。
+    - 地点：尽可能提取城市名（匹配系统城市列表 [{cities_str}]）或国家/大洲；若完全无地点信息，才允许为空。
+
+    【判定示例 - Few Shot】
+    ✅ 询盘 (STOCK_PRICE_INQUIRY):
+    - "Please quote 40HC Used in Vancouver." → 有箱型+地点 → 询盘
+    - "Do you have any 20GP containers?" → 有箱型 → 询盘
+    - "What containers are available in Houston?" → 无箱型但有地点询问 → 询盘
+    - "Need 10 units of 40'HC for Edmonton." → 有箱型+数量+地点 → 询盘
+    - "We are looking for used 20DC in Canada." → 有箱型+地点 → 询盘
+
+    ❌ 非询盘 (NON_BUSINESS_EMAIL):
+    - "Please send me your full inventory list." → 无箱型、无地点询问 → 非询盘
+    - "I need to see your updated inventory" → 无箱型、无地点询问 → 非询盘
+    - "We're kicking off sales, need your inventory." → 无箱型、无地点询问 → 非询盘
+    - "Follow us on LinkedIn for updates" → 广告 → 非询盘
+    - "Deal ID 12345, new offer" → 平台通知 → 非询盘
+
+    【核心规则】本系统仅处理客户的集装箱售前询盘 (STOCK_PRICE_INQUIRY)。其他业务（订单确认、发票、付款、对账、售后、租赁、供应商事务）一律拦截并输出 NO_REPLY。
+
+    【输出格式】严格按照以下 JSON Schema：
+    {json.dumps(cfg.get("router_output_schema", {}), ensure_ascii=False, separators=(',', ':'))}
     """
 
-    try:
-        response = ai_client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {"role": "system", "content": router_prompt},
-                {"role": "user", "content": f"邮件标题:{e_title}\n\n邮件正文:{e_content}\n\n请输出JSON:"}
-            ],
-            response_format={"type": "json_object"}, # 确保返回的是JSON
-            temperature=0.1 # 调低温度，确保 Router 提取实体的稳定性
-        )
-        result_json = response.choices[0].message.content.strip()
-        return json.loads(result_json)
-    except Exception as e:
-        print("[Router 预测失败]", e)
-        # 降级处理，返回安全的默认 JSON
-        return {
-            "primary_intent": "UNKNOWN",
-            "secondary_intents": [],
-            "action": "NO_REPLY",
-            "entities": {},
-            "risk_level": "HIGH"
-        }
+    # 重试机制：最多尝试 3 次（包括首次）
+    max_retries = 3
+    retry_delay = 2  # 秒
+
+    for attempt in range(max_retries):
+        try:
+            response = ai_client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[
+                    {"role": "system", "content": router_prompt},
+                    {"role": "user", "content": f"邮件标题:{e_title}\n\n邮件正文:{e_content}\n\n请输出JSON:"}
+                ],
+                temperature=0.0
+            )
+            raw = response.choices[0].message.content.strip()
+            json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if json_match:
+                raw = json_match.group()
+            return json.loads(raw)
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            # 如果是服务繁忙/超时类错误，且还有重试次数，则等待后重试
+            is_retryable = any(keyword in error_msg for keyword in [
+                "503", "service_unavailable", "timeout", "busy", "rate_limit"
+            ])
+
+            if is_retryable and attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)  # 指数退避: 2s, 4s, 8s
+                print(f"[Router] 服务繁忙 (尝试 {attempt + 1}/{max_retries})，{wait_time}秒后重试...")
+                time.sleep(wait_time)
+                continue
+            else:
+                # 非重试类错误 或 重试次数已用完
+                print(f"[Router 预测失败] 详情: {e}")
+                return {
+                    "primary_intent": "UNKNOWN",
+                    "secondary_intents": [],
+                    "action": "NO_REPLY",
+                    "entities": {},
+                    "risk_level": "HIGH"
+                }
 
 
 # ==========================================================
-# 5. Stage 2: Skill Aggregator (多意图加载业务SOP)
+# 5. Stage 2: Skill Aggregator
 # ==========================================================
 def build_skill_context(router_result):
-    cfg = get_index_config()
-    intent_map = cfg.get("intent_to_module", {})
-    modules = []
-    used_modules = set()
-    intents = []
-
-    primary = router_result.get("primary_intent")
-    if primary:
-        intents.append(primary)
-
-    secondary = router_result.get("secondary_intents", [])
-    if isinstance(secondary, list):
-        intents.extend(secondary)
-
-    for intent in intents:
+    intent_map = get_index_config().get("intent_to_module", {})
+    intents = [router_result.get("primary_intent")] + router_result.get("secondary_intents", [])
+    used_modules, modules = set(), []
+    for intent in filter(None, intents):
         module_path = intent_map.get(intent)
         if module_path and module_path not in used_modules:
-            module_content = load_module(module_path)
-            if module_content:
-                modules.append(
-                    f"\n==============================\n业务模块:{intent}\n文件:{module_path}\n==============================\n{module_content}\n")
-                used_modules.add(module_path)
-
+            modules.append(f"\n[模块:{intent}]\n{load_module(module_path)}")
+            used_modules.add(module_path)
     return "\n".join(modules)
 
 
 # ==========================================================
-# 6. Stage 3: AI邮件生成
+# 6. Stage 3: AI邮件生成 (Drafter) 带自我纠错功能
 # ==========================================================
-def generate_draft_reply(e_title, e_content, router_result):
+def generate_draft_reply(e_title, e_content, router_result, inventory_data, previous_draft=None, rejection_reason=None):
     if router_result.get("action") == "NO_REPLY" or router_result.get("primary_intent") in ["NON_BUSINESS_EMAIL",
                                                                                             "NON_CUSTOMER_EMAIL",
                                                                                             "LEASE_INQUIRY"]:
         return "NO_REPLY"
 
-    global_rules = load_global_rules()
-    entity_rules = load_entity_rules()
-    module_context = build_skill_context(router_result)
-    # 注：response_guard.md 定位是"发送前质检清单"，现改为在 Stage 4 Reviewer 阶段使用
-    # (审核标准更贴近文件本身的设计意图)，草稿阶段不再重复注入，减少 prompt 体积。
+    no_stock_keywords = ["暂无客户所求", "暂无匹配现货", "无法获取库存", "未明确指定箱型", "无法生成有效查询"]
+    if any(kw in inventory_data for kw in no_stock_keywords):
+        return """Dear Team,
+        Thank you for your inquiry.
+        Unfortunately, we currently do not have the requested inventory available in this location. Please let us know if we can assist you with other options.
+        Best regards,
+        Hysun Team"""
 
-    # --------------------------------------------------------
-    # [核心修改] 获取 RAG 数据
-    # --------------------------------------------------------
-    inventory_data = query_internal_inventory(router_result.get("entities", {}), e_content)
-    # 1. 获取动态的城市列表，例如 ["Aarhus", "Antwerp", "Shanghai", ...]
-    valid_cities = fetch_system_cities()
-    cities_str = ", ".join(valid_cities) if valid_cities else "系统城市库未加载"
-    system_prompt = f"""
-        你是Hysun企业资深业务员助手。
-        你的任务：根据客户邮件，生成可以直接发送的商务回复。
+    # 🌟 动态提取客户名字，生成专属问候语
+    sender_name = router_result.get("entities", {}).get("sender_name", "").strip()
+    first_name = sender_name.split(" ")[0] if sender_name else ""
+    greeting = f"Dear {first_name}," if first_name else "Dear Team,"
 
-        ========================
-        【实时内部库存与价格数据 (RAG)】
-        {inventory_data}
-        ========================
+    system_prompt = f"""你是Hysun资深外贸业务员，负责根据系统库存数据生成专业商务邮件。
 
-        【核心销售与防幻觉指令】
+    【📋 库存展示格式 — 邮件正文中必须按此结构组织】
 
-        1. 【现货优先策略】：如果上方库存数据中包含“现货(On-ground)”，请优先向客户推介现货，并告知对应的指导价。
-        2. 【在途备用策略】：如果上方库存数据中【没有任何现货】，但有“在途(Upcoming)”，告知客户即将到港的数量和时间。
-        3. 🚨【库存数量谈判策略（饥饿营销至高指令）】：
-       - 除非客户在邮件中**明确提出了具体的购买数量**（例如 "I need 5 units"），否则你**【绝对禁止】主动向客户暴露我们的具体库存数字**！只需告知有现货即可。
-       - 即使客户提出了具体数量，但如果我们的库存 **少于** 客户需求，也**绝对禁止暴露真实库存数字**！只需从容告知有货并报价，随后引导客户确认。
-       - 只有当客户明确指定了需求数量，且我们的库存大于等于该需求时，才允许在回复中提及能够满足他的对应数量。
-        4. 【无货防守】：如果客户询问的箱型查不到任何数据（如 40'OT），明确告知暂无可用库存。严禁捏造不存在的库存、价格或到港日期！
+    当库存数据包含新箱（NEW / New 1-Trip）和旧箱（CW / CW+ / IICL 等）时，按以下格式展示：
 
-      5. 🚨【严格货品对齐（防指鹿为马与私自降级）】：
-       - 严格对比“客户请求的箱型”与“RAG返回的真实箱型箱况”。
-       - 🚨【绝对禁止迎合篡改】：你输出的货品规格必须 **100% 照抄 RAG 底牌**！如果底牌是 "CW+"，你写出的报价列表里就必须是 "CW+"，**绝对禁止**为了迎合客户要求的 "CW" 而私自将其删减或降级为 "CW"！
+    1. 先用一句自然的话引入，例如：
+       "Here is our current stock availability in [地点]:"
+       或
+       "We currently have the following units available in [地点]:"
 
-        6. 🚨【属性物理隔离与按需披露（颜色与年份 YOM）】：
-       - 🚨【按需披露至高指令】：除非客户在邮件中**明确提到了**对颜色（Color）或年份（YOM）的需求，否则你**【绝对禁止】**在回复中主动提及任何颜色或年份信息！保持报价的干净和简练。
-       - 只有当客户明确要求了特定颜色或年份（如 YOM 2022），你才需要去对比底层数据。如果底层数据不符，如实告知实际情况并询问是否接受。
-       - ⚠️【特别声明 "Mixed" 颜色】：仅在客户询问颜色且底层为 "Mixed" 时，才解释为 "various colors"。
-       - 🚨【绝对防幻觉底线】：如果客户询问了，但数据中没有标注，你【绝对禁止】自行脑补或猜测！必须诚实说明需向堆场进一步核实具体参数。
+    2. 然后直接列出库存详情，不加"新箱："或"旧箱："等标签：
 
-        7. 💡【箱况精准推介与场景化营销】：
-           - 【新箱地域属性】：中国境内现货新箱通常为 "NEW"；海外新箱为 "New 1 trip"（因经过一次海运）。
-           - 【高质量旧箱推介】：客户要求“箱况好一点的旧箱”时，优先推荐 "New-IICL" (使用2-9次的极优箱)、"IICL" 或 "CW+"。
-           - 🚨【防欺诈底线】：绝不可将 "New-IICL" 当作全新出厂箱卖，必须如实说明是极优状态二手箱。
+       Style: 40HQ
+       Condition: NEW
+       POL: Shanghai
+       Color: RAL5010
+       YOM: 2024
+       Price: USD2300.00/unit
+       Q'ty: Available
+       Payment: 100% TT before pick up.
 
-      8. 📊【精明销售心智与上下文连带推销 (Contextual Upsell)】：
-       - 🚨【历史参照物联动】：如果客户在最新邮件中提到了 "same as before", "same color", "matching" 等字眼，你**必须强制阅读邮件历史记录（如 PI 详情）**，找出客户所指的具体属性（如 RAL1015/Light ivory），并**优先从 RAG 底牌中挑选出具有该相同属性的现货**进行推销！
-       - 【化解价格分歧的绝招】：如果客户的目标价极低（如 $1500 买 CW），而我们只有高价新箱（如 $3500 的 New 1 trip）。在拒绝低价的同时，**必须利用匹配的属性（如相同的颜色）作为卖点来支撑高价**。例如："We don't have CW at $1500. However, if you are looking for the exact same color matching (Light ivory/Slate grey), we have brand new units available..."
-       - 【最低价优先】：在满足上述条件的基础上，尽量挑选符合条件的最低价。
+    3. 【重要】Payment 字段是 Hysun 的标准付款条款，必须固定显示为 "100% TT before pick up."。
+       这不是虚构数据，而是公司的标准商务条款，必须在每封报价邮件中展示。
 
-        9. 🏗️【特定堆场防守与同城平替 (Depot Matching)】：
-           - 如果客户明确指定了堆场（如 DE WELL DEPOT），而 RAG 返回的是同城其他堆场（如 Zhuoheng depot），**绝对禁止无视客户要求直接报价**！
-           - 必须先诚实礼貌地说明指定堆场无货："Currently, we do not have available stock at [指定堆场]." 随后顺势推介同城替代堆场。
+    【格式规则】
+    1. 引导句必须包含具体地点（如 "in Haiphong"）。
+    2. 【绝对禁止】使用"新箱："或"旧箱："作为标题或标签。
+    3. 每个字段单独一行，字段名+冒号+内容。
+    4. POL：直接提取系统数据(RAG)中显示的城市名称（例如底牌是 📍 [CA] Winnipeg，POL 字段就写 Winnipeg）。
+    5. Color 如果系统数据中是 Mixed，写 "Mixed"；如有明确颜色（如 RAL5010 或 Slate grey），写具体颜色。
+    6. YOM 如果系统数据没有，新箱写当前年份，旧箱写年份范围。
+    7. Price 必须引用 RAG 中的底价，无价格则写 "Upon request"。
+    8. Q'ty 用 "Available" / "Limited availability" / "Available upon request"。绝对不能写具体数字。
+    9. 【固定】Payment 必须写 "100% TT before pick up."，这是 Hysun 的标准条款。
+    10. 【去重与最低价展示】：如果底层数据返回了多个规格、状态和颜色完全相同的选项，必须只展示价格最低的那一个，绝对禁止重复列出多个相同规格的选项。
 
-      10. 📋【强制输出格式锁 (Strict Template Lock)】🚨：
-       - 当你在邮件中列出具体的库存选项时，必须严格遵循以下结构填空。
-       - 严禁拼错堆场名称！**严禁篡改 RAG 数据原本的箱型和箱况！**（例如：底牌是 CW+，绝对不能降级写成 CW）。
-       - 根据第3条规则，如果不需要/不允许报出具体数量，请直接用 "Available" 代替具体的数字。
-       - 强制参考格式（基础版 - 客户未问颜色和年份时使用）：
-         - [具体数字 或 Available] units of [100%照抄底层的箱型箱况] on-ground at [严格复制堆场名] depot, at $[单价]/unit
-       - 强制参考格式（完整版 - 仅当客户明确询问了对应参数时，才在末尾加上对应的括号）：
-         - [具体数字 或 Available] units of [100%照抄底层的箱型箱况] on-ground at [严格复制堆场名] depot, at $[单价]/unit (Color: [颜色说明], YOM: [年份])
-         **【租赁剥离声明】：**如果客户同时询问了购买和租赁，请在报价前礼貌且明确地声明 Hysun 仅提供集装箱销售业务，不提供租赁服务。然后再顺势给出购买的报价。
-        参考话术："Please note that Hysun strictly focuses on container sales and we do not offer leasing services. However, regarding your purchase request..."
+    【🚨 绝对红线】
+    1. 【问候语格式】：邮件开头必须严格使用 "{greeting}"。【绝对禁止】使用 "Dear Customer"、"Dear Sir/Madam"、"Dear Valued Partner"。
+    2. 【价格引用】：只能引用 RAG 中的底价，禁止凭空捏造。
+    3. 【数量保密】：绝对不能写具体数字。
+    4. 【禁止承诺】：禁止 "lock in"、"guarantee"、"reserve"、"confirm"。
+    5. 【禁止虚构】：Payment 字段虽然是固定的，但它是 Hysun 的标准商务条款，不是虚构数据。
 
-        ========================
-        【全局规则】
-        {global_rules}
+    【系统库存数据 (RAG)】
+    {inventory_data}
 
-        【实体识别规则】
-        {entity_rules}
+    【客户原始需求】
+    客户要求：{e_content[:500]}...
 
-        【业务SOP】
-        {module_context}
+    【执行要求】
+    - 仅输出邮件正文，无Markdown、无解释。
+    - 必须严格以 "{greeting}" 开头，以 "Best regards, Hysun Team" 结尾。
+    """
 
-        【地理位置强匹配与纠错规则】
-        当前我们系统支持的标准城市列表如下：
-        [{cities_str}]
-        当客户在邮件中提到城市时（如 "Shangai" 或中文"上海"），必须强制映射为上方列表中的标准拼写！若不在列表中则保留原词。
-        ========================
+    # 🌟 动态构建 User Prompt (加入自动纠错机制)
+    user_prompt = f"客户邮件标题: {e_title}\n\n客户邮件正文: {e_content}\n\n请根据 RAG 数据生成专业回复。"
 
-        当前邮件分析结果：
-        {json.dumps(router_result, ensure_ascii=False, indent=2)}
-
-    ========================
-    【强制回复逻辑链路 (Execution Pipeline)】🚨 必须严格按以下顺序生成邮件：
-    第一步：【处理历史订单】如果邮件涉及 PI、发票或历史订单，必须先在开头确认收到，并提醒付款/索要水单（Wire proof）。
-    第二步：【洞察隐藏属性】强制检索原邮件（包含引用的历史邮件），找出客户提及的颜色（如 RAL1015 = Light ivory, RAL7015 = Slate grey），以此作为匹配标准。
-    第三步：【执行报价防守】如果客户目标价过低，礼貌拒绝该价格。
-    第四步：【精选替代方案】从 RAG 数据中，优先挑选与客户历史颜色匹配的现货；若无颜色要求，则强制挑选同箱型中**价格最低**的 1-2 个选项！绝对禁止罗列全部数据！
-    第五步：【套用格式锁】只要客户提到了 color 或 YOM，列出选项时必须 100% 遵守上方第10条"强制输出格式锁"的【完整版】格式，不得漏掉括号内的属性。
-    ========================
-        生成要求：
-        1. 只输出邮件正文。禁止解释、Markdown 及分析过程。
-        2. 必须回复邮件中的所有请求。不得添加原邮件没有的信息。
-        3. 签名必须符合业务角色(Hysun Sales Team)。
-        """
+    if previous_draft and rejection_reason:
+        user_prompt += f"\n\n🚨 【风控拦截警告 - 必须严格修改】：\n你上次生成的草稿被风控系统(Reviewer)严厉拦截！\n拦截原因：{rejection_reason}\n上次的错误草稿：\n{previous_draft}\n\n请务必吸取教训，严格根据以上拦截原因，重新生成一封完美合规的邮件！"
 
     try:
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"邮件标题:{e_title}\n\n邮件正文:{e_content}\n\n请生成回复。"}
+                {"role": "user", "content": user_prompt}
             ],
-            temperature=0.2,
-            max_tokens=1500
+            temperature=0.3,
+            max_tokens=1500,
+            presence_penalty=0.2
         )
-        return response.choices[0].message.content.strip()
+        draft = response.choices[0].message.content.strip()
+
+        # 兜底修复：确保问候语和签名合规
+        if draft:
+            # 强制纠正乱叫名字的现象
+            if draft.startswith("Dear Customer") or draft.startswith("Dear Sir") or draft.startswith("Dear Valued"):
+                draft = draft.replace("Dear Customer,", f"{greeting}", 1)
+                draft = draft.replace("Dear Sir/Madam,", f"{greeting}", 1)
+                draft = draft.replace("Dear Valued Partner,", f"{greeting}", 1)
+                draft = draft.replace("Dear Team,", f"{greeting}", 1)
+
+            # 确保签名存在
+            if not draft.endswith("Hysun Team"):
+                if "Best regards," in draft:
+                    draft = draft + "\nHysun Team"
+                else:
+                    draft = draft + "\n\nBest regards,\nHysun Team"
+
+            # 禁止承诺性词汇
+            forbidden_words = ["lock in", "guarantee", "reserve", "confirmed", "will be ready", "guaranteed"]
+            for word in forbidden_words:
+                if word in draft.lower():
+                    draft = draft.replace(word, "please let us know")
+
+        return draft if draft else f"""{greeting}\n\nThank you for your inquiry.\n\nWe are reviewing your request and will update you accordingly.\n\nPlease let us know if you have any questions.\n\nBest regards,\nHysun Team"""
     except Exception as e:
-        print("[邮件生成失败]", e)
+        print(f"\n💥 [Drafter 阶段报错]: {e}")
         return None
 
 
 # ==========================================================
-# 7. Stage 4: Response Reviewer (AI二次审查)
+# 7. Stage 4: Response Reviewer
 # ==========================================================
-def review_ai_reply(original_title, original_content, draft_reply, router_result):
+def review_ai_reply(original_title, original_content, draft_reply, router_result, inventory_data):
     if draft_reply == "NO_REPLY":
-        if router_result.get("action") == "NO_REPLY":
-            return True, "Correctly identified as NO_REPLY"
-        else:
-            return False, "Generated NO_REPLY but Router indicated REPLY"
+        return (True, "") if router_result.get("action") == "NO_REPLY" else (False,
+                                                                             "Generated NO_REPLY but Router indicated REPLY")
 
-    response_guard = load_response_guard()
+    review_prompt = f"""你是Hysun邮件质量审核专家(Response Guard)。
+    任务：根据合规标准严格审查AI生成的邮件草稿，决定是否允许发送。
+    【权威审核标准】
+    {load_response_guard()}
 
-    review_prompt = f"""你是 Hysun 企业的邮件质量审核专家 (Response Guard)。
-    你的任务是严格审查 AI 生成的邮件草稿是否符合企业合规要求，并决定是否可以直接发送给客户。
+    【系统已知事实 (防误判特赦令)】
+    1. 以下是系统查出的真实库存底牌。草稿中引用此处的【具体堆场名称、价格、年份、颜色等】绝对合法，属于业务跟单的正常行为，【绝对不可】判为虚构(Hallucination)！
+    {inventory_data}
+    2. 🚨 【固定商务条款特赦】：草稿中固定出现的 "Payment: 100% TT before pick up." 为 Hysun 公司标准话术，绝对禁止判为虚构！
 
-    ========================
-    【权威审核标准】(以第13条 Final Reviewer Checklist 为最终判定依据)
-    {response_guard}
-    ========================
+    【关键业务判定细节】
+    1. 客户界定：凡表达"询价/寻箱/求报价/下订单"者均视为合法客户。仅当发件人是"催款/发票供应商"或"索要佣金中介"时，才强制 FAIL。
+    2. 遗漏请求豁免：草稿中出现"内部确认中"或"追问缺失信息"等，属于合规防守，不视为遗漏请求。
 
-    【业务补充说明】(response_guard.md 未覆盖、但同样重要的判定细节)
-    1. 【身份界定】：向我们询价、寻找箱子 (looking for containers)、要求我们提供报价 (send us your price/offer) 的都是【客户】，属于合法业务！只有当发件人是向我们索要欠款、发送发票(invoice)的供应商，或是要佣金的中介时，才必须 FAIL。
-    2. 【遗漏核心问题的例外】：如果草稿中说明了"正在与内部团队确认 (checking with our team)"、"内部审核中 (reviewing internally)"，或者"追问了缺失信息（如确认数量）"，这属于完全合规的业务防守，绝对不属于遗漏请求。
-
-    必须严格输出 JSON 格式：
-    {{
-      "status": "PASS", // 或者 "FAIL"
-      "feedback": "如果 FAIL，请用一句话指出具体违反了 response_guard.md 的哪一条标准，并给出修改建议。如果 PASS，则输出空字符串。"
-    }}
+    严格按以下Schema输出JSON (无Markdown，无解释):
+    {{"status": "PASS", "feedback": "若FAIL，指出违反的具体条款并给建议；若PASS，输出空字符串。"}}
     """
-
     try:
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
@@ -795,210 +614,95 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
             temperature=0,
             response_format={"type": "json_object"}
         )
-
-        result_content = response.choices[0].message.content
-        data = json.loads(result_content)
-        status = data.get("status", "FAIL").upper()
-        return status == "PASS", data.get("feedback", "")
+        data = json.loads(response.choices[0].message.content)
+        return data.get("status", "FAIL").upper() == "PASS", data.get("feedback", "")
     except Exception as e:
-        print("[审核系统异常]", e)
+        print(f"[Reviewer 系统异常] {e}")
         return True, "Review system failed, allowing pass"
 
 
 # ==========================================================
-# 8. 最终生成入口
+# 8. 最终生成入口 (带自我纠错循环机制)
 # ==========================================================
 def generate_ai_reply(e_title, e_content):
+    print("\n" + "=" * 50)
+    print("📥 [DEBUG 接收到的原始邮件]")
+    print(f"【标题】: {e_title}")
+    print(f"【正文】:\n{e_content}")
+    print("=" * 50 + "\n")
     print("Stage 1: Intent Router...")
     router_result = predict_intent(e_title, e_content)
-    print("Router Result:")
-    print(json.dumps(router_result, ensure_ascii=False, indent=2))
+    print("Router Result:", json.dumps(router_result, ensure_ascii=False))
+
+    inventory_data = query_internal_inventory(router_result.get("entities", {}), e_content)
+    print("\n🤖 [DEBUG 查到的库存底牌]：\n" + inventory_data)
 
     print("Stage 2/3: Generate Draft...")
-    draft = generate_draft_reply(e_title, e_content, router_result)
+    draft = generate_draft_reply(e_title, e_content, router_result, inventory_data)
+
     if not draft:
+        print("\n❌ 草稿生成失败或内容为空，流程已中断。")
         return None
 
-    print("Stage 4: Reviewing...")
-    print("\n====== AI Draft ======\n" + draft + "\n======================\n")
+    # 🌟 核心升级：自动重写循环 (最多允许 Reviewer 打回 2 次)
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            print(f"\n🔄 Stage 5: 触发自动反思与纠错引擎 (第 {attempt}/{max_retries} 次重写)...")
+            # 把前一次的废稿和骂它的原因喂回去
+            draft = generate_draft_reply(e_title, e_content, router_result, inventory_data, previous_draft=draft, rejection_reason=feedback)
 
-    passed, feedback = review_ai_reply(e_title, e_content, draft, router_result)
+        print(f"Stage 4: Reviewing (Attempt {attempt + 1})...")
+        passed, feedback = review_ai_reply(e_title, e_content, draft, router_result, inventory_data)
 
-    if passed:
-        return draft
-    else:
-        print(f"[Reviewer 拒绝该回复] 原因: {feedback}")
-        return None
+        if passed:
+            print("\n====== 最终邮件 (PASS) ======\n" + draft + "\n======================\n")
+            return draft
+        else:
+            print(f"\n❌ [Reviewer 拒绝发件] 原因: {feedback}")
 
-
-# ==========================================================
-# 9. 测试预览模式
-# ==========================================================
-def test_preview_emails():
-    conn = None
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            sql = f"""
-            SELECT e_id, e_title, e_content
-            FROM {TABLE_NAME}
-            WHERE ai_status = 0 AND flag = 0 and e_id = 647
-            ORDER BY uptime DESC, e_id ASC
-            LIMIT 1;
-            """
-            cursor.execute(sql)
-            emails = cursor.fetchall()
-
-            if not emails:
-                print("暂无待处理邮件")
-                return
-
-            for email in emails:
-                e_id = email["e_id"]
-                title = email.get("e_title", "")
-                content = email.get("e_content", "")
-
-                print("\n" + "=" * 80)
-                print(f"正在测试邮件ID:{e_id}")
-                print("=" * 80)
-                print("\n【标题】\n", title)
-                print("\n【正文】\n", content)
-                print("\n" + "-" * 80)
-                print("AI处理中...")
-
-                reply = generate_ai_reply(title, content)
-                if reply:
-                    print("\n【最终确认回复 (PASS)】\n", reply)
-                else:
-                    print("\n【AI生成中断或被Reviewer拦截】")
-                print("=" * 80)
-    except Exception as e:
-        print("[Preview数据库错误]", e)
-    finally:
-        if conn:
-            conn.close()
+    print("\n❌ 自动重写次数耗尽，AI 无法修复错误，已转交人工处理。")
+    return None
 
 
 # ==========================================================
-# 10. 正式生产处理模式
-# ==========================================================
-def process_pending_emails():
-    conn = None
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-            sql = f"""
-            SELECT e_id, e_title, e_content
-            FROM {TABLE_NAME}
-            WHERE ai_status = 0 AND flag = 0
-            ORDER BY uptime DESC
-            LIMIT 1
-            FOR UPDATE;
-            """
-            cursor.execute(sql)
-            email = cursor.fetchone()
-
-            if not email:
-                return False
-
-            e_id = email["e_id"]
-            title = email.get("e_title", "")
-            content = email.get("e_content", "")
-
-            print(f"开始处理邮件:{e_id}")
-
-            cursor.execute(
-                f"UPDATE {TABLE_NAME} SET flag = 2,ai_status = 1 WHERE e_id=%s",
-                (e_id,)
-            )
-            conn.commit()
-
-            reply = generate_ai_reply(title, content)
-
-            if reply:
-                if reply == "NO_REPLY":
-                    cursor.execute(
-                        f"UPDATE {TABLE_NAME} SET ai_reply=%s, ai_status=4, uptime=NOW() WHERE e_id=%s",
-                        (reply, e_id)
-                    )
-                    print(f"[跳过回复] {e_id} 识别为 NON_BUSINESS_EMAIL 或 NON_CUSTOMER_EMAIL")
-                else:
-                    cursor.execute(
-                        f"UPDATE {TABLE_NAME} SET ai_reply=%s, ai_status=2, uptime=NOW() WHERE e_id=%s",
-                        (reply, e_id)
-                    )
-                    print(f"[成功] {e_id}")
-            else:
-                cursor.execute(
-                    f"UPDATE {TABLE_NAME} SET ai_status=3, uptime=NOW() WHERE e_id=%s",
-                    (e_id,)
-                )
-                print(f"[失败/被拦截] {e_id}")
-
-            conn.commit()
-            return True
-    except Exception as e:
-        print("[生产处理错误]", e)
-        if conn:
-            conn.rollback()
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-
-# ==========================================================
-# 11. 粘贴测试模式
+# 9. 粘贴测试模式
 # ==========================================================
 def test_static_email():
     print("\n" + "=" * 80)
-    print(" 📧 本地测试模式")
+    print(" 📧 本地极速测试模式")
     print("=" * 80)
 
-    # --------------------------------------------------
-    # ↓↓↓ 请在此处直接粘贴您的测试邮件标题和正文 ↓↓↓
-    # --------------------------------------------------
-    title = "Container Procurement"
-
+    title = "Gray 40HC NEW - Tacoma."
     content = """
-  Dear Alfy,
-Good day!
-My name is Fezan from Waterlink Group of Companies. We are a logistics and supply-chain group based in Karachi, Pakistan, operating businesses including bunkering, on-dock and off-dock CFS facilities, freight forwarding, and other maritime services.
+  Hi, 
 
-We are looking to purchase and/or lease approximately 50 dry containers—30 x 20’ GP and 20 x 40’ HC. Please share your current availability and best ex-depot prices in Karachi. We would also consider ex-China or Colombo where availability or pricing is better. Please quote new/one-trip and used cargo-worthy units separately.
-For Karachi stock, kindly confirm whether the containers are duty paid with complete ownership documents/NOC, or available for international SOC movement under the applicable bond arrangement.
-Please also mention the make, year, CSC validity, depot location, lift-on charges, payment terms and quote validity.
-If you recommend another location offering better availability or value, please let me know.
 
-Looking forward to your reply 
+Are these units still available?
+US	Tacoma	40HC	New 1 trip		RAL7015	FLP/LB/EOD	2025-2026	1	US$3,350	2	2026-08-14	Affordable Storage Containers	1670 Marine View Dr, Tacoma, WA 98422
+US	Tacoma	40HC	New 1 trip		RAL7016	FLP/LB	2025-2026	1	US$3,350	0		Tahoma Global Logistics	2102 Alexander Avenue Tacoma, United States
 
-Kind regards,
+
+Thank you 
+
+
+Respectfully,
+Thiago Cirino | Inventory Coordinator
+USA Containers
+📞 Direct: (385)417-4103
+🇺🇸 Office: 877-395-6851
+usacontainers.co | thiago@usacontainers.co
+Respect Truckers | Thank you for your business
+ 
+New to shipping containers? Click here to explore helpful videos on ownership, maintenance, and expert tips to get the most out of your container.
     """
-    # --------------------------------------------------
 
-    print("\n【标题】\n", title)
-    print("\n【正文】\n", content)
-    print("\n" + "-" * 80)
-    print("AI处理中...")
-
-    reply = generate_ai_reply(title, content)
-
-    if reply:
-        print("\n【最终确认回复 (PASS)】\n", reply)
-    else:
-        print("\n【AI生成中断或被Reviewer拦截】")
-    print("=" * 80)
+    print("\n【正在处理...】")
+    generate_ai_reply(title, content)
 
 
-# ==========================================================
-# 12. 程序入口
-# ==========================================================
 if __name__ == "__main__":
-    print("================================")
-    print(" Hysun AI Email Agent")
-    print("================================")
+    test_static_email()
+    # test_preview_emails() # <- 从数据库拉取未处理邮件进行预览
 
-    # 您可以在这里自由切换想要运行的方法：
-    test_static_email()  # <- 临时测试某封特定邮件
-    # test_preview_emails()   # <- 从数据库拉取未处理邮件进行预览
     # process_pending_emails() # <- 生产环境处理入库

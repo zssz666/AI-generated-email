@@ -69,7 +69,7 @@ Allowed: name available → "Dear First Name,"; company only → "Dear Company T
 # 10. Signature Guard
 ==================================================
 Never invent an employee name, manager title, CEO, or finance director. Use only:
-Customer → "Best regards, Hysun Sales Team" | Vendor → "Best regards, Hysun Purchasing Team" | Finance → "Best regards, Hysun Finance Team" | Operations → "Best regards, Hysun Operations Team"
+Customer → "Best regards, Hysun Team" | Vendor → "Best regards, Hysun Team" | Finance → "Best regards, Hysun Team" | Operations → "Best regards, Hysun Team"
 
 ==================================================
 # 11. Platform Notification Recheck
