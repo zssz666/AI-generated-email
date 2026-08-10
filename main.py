@@ -7,7 +7,7 @@ from functools import lru_cache
 import pymysql
 import requests
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -337,67 +337,45 @@ def query_internal_inventory(entities, email_content):
 
 
 # ==========================================================
-# 4. Stage 1: Router
+# 4. Stage 1: Router (带动态拦截原因上报)
 # ==========================================================
 def predict_intent(e_title, e_content):
     cfg = get_index_config()
     valid_cities = fetch_system_cities()
     cities_str = ", ".join(valid_cities) if valid_cities else "Shanghai, Ningbo, Qingdao, Antwerp, Rotterdam"
 
-    intent_keys = list(cfg.get("intent_to_module", {}).keys())
-    if not intent_keys:
-        intent_keys = ["STOCK_PRICE_INQUIRY", "NON_BUSINESS_EMAIL", "ORDER_CONFIRM_INVOICE"]
-
     router_prompt = f"""你是Hysun邮件意图与实体识别引擎。
 
-    【📋 询盘 vs 非询盘判定标准（必须严格遵循）】
+        【🚨 顶级安全风控红线 (God Mode Override)】
+        只要邮件正文中提及索要：银行账户、电汇/打款信息(wire)、付款路径、开票信息 或催促紧急打款，必须强制触发风控：
+        - "primary_intent" 设为 "BANK_SECURITY_CHECK"
+        - "action" 设为 "NO_REPLY"
 
-    **STOCK_PRICE_INQUIRY（询盘）** — 满足以下 **任意一条** 即判为询盘：
-    1. 邮件中明确指定了具体箱型（如 20GP、40HC、20DC、40'HC Used 等）
-    2. 邮件中明确询问了某地是否有可用集装箱（如 "available in Vancouver?"、"have stock in Houston?"、"any containers in Europe?"），即使未指定箱型
-    3. 邮件中明确指定了数量或地点，并带有采购意向词（need、looking for、quote、purchase、buy）
-    4. 邮件中明确询问价格（quote/price/cost）
+        【🛑 活人接管防冲突红线 (Human-in-Loop Override)】
+        如果正文中包含明显的“历史往来对话”或“已有同事在深入跟进的痕迹”（例如：引用了同事的具体回复、客户直呼某位业务员的名字探讨细节），说明已有专人接管，你【绝对不能】插手干预：
+        - "primary_intent" 设为 "NON_BUSINESS_EMAIL"
+        - "action" 设为 "NO_REPLY"
 
-    **NON_BUSINESS_EMAIL（非询盘）** — 满足以下任意一条：
-    1. 仅索要"全部库存清单"或"最新库存表"，但未提及任何具体采购需求（无箱型、无地点、无数量）
-    2. 邮件内容仅为市场调研或供应商筛选，未体现具体采购场景
-    3. 纯粹的广告、营销、平台通知（如 xChange 通知）、LinkedIn 推广
-    4. 发票催款、对账、供应商付款等供应商侧业务
+        【📋 询盘 vs 非询盘判定标准】
+        **STOCK_PRICE_INQUIRY（询盘）**：明确指定具体箱型，或明确询问某地是否有集装箱，或询问价格。
+        **NON_BUSINESS_EMAIL（非询盘）**：索要全部库存表、市场调研、纯广告。
 
-    【🚨 最高优先级判定规则】
-    - 如果邮件中**出现了具体箱型名称**（无论是否附带地点/数量），**必须**判为 STOCK_PRICE_INQUIRY。
-    - 如果邮件**未出现箱型**，但**明确询问了某地的可用库存**（如 "what do you have in Houston?"），也**必须**判为 STOCK_PRICE_INQUIRY。
-    - 只有**既无箱型、也无地点询问、仅索要清单**的，才判为 NON_BUSINESS_EMAIL。
+        【实体提取规范】
+        {load_entity_rules()}
+        - 颜色/箱况：明确指定的颜色存入requested_color；明确指定的新旧存入requested_condition。
+        - 地点：尽可能提取城市名（匹配系统城市列表 [{cities_str}]）。
 
-    【实体提取规范】
-    {load_entity_rules()}
-    - 颜色/箱况：明确指定的颜色(如RAL1015)存入requested_color；明确指定的新旧(如1TRIP, CW)存入requested_condition。
-    - 地点：尽可能提取城市名（匹配系统城市列表 [{cities_str}]）或国家/大洲；若完全无地点信息，才允许为空。
+        【输出格式】严格按照以下 JSON Schema：
+        {json.dumps(cfg.get("router_output_schema", {}), ensure_ascii=False, separators=(',', ':'))}
 
-    【判定示例 - Few Shot】
-    ✅ 询盘 (STOCK_PRICE_INQUIRY):
-    - "Please quote 40HC Used in Vancouver." → 有箱型+地点 → 询盘
-    - "Do you have any 20GP containers?" → 有箱型 → 询盘
-    - "What containers are available in Houston?" → 无箱型但有地点询问 → 询盘
-    - "Need 10 units of 40'HC for Edmonton." → 有箱型+数量+地点 → 询盘
-    - "We are looking for used 20DC in Canada." → 有箱型+地点 → 询盘
+        【🔥 动态审计日志特别指令】
+        如果你将 "action" 判定为 "NO_REPLY"，请务必在输出的 JSON 中额外新增一个字段 `"intercept_reason"`，用一句简短的中文具体说明拦截原因。
+        示例："该邮件为打款/发票邮件，不在现货销售职责范围，停止生成。" 
+        或："该邮件为历史往来回复，正文中已有同事 Alin 的跟进记录，为防冲突停止处理。"
+        """
 
-    ❌ 非询盘 (NON_BUSINESS_EMAIL):
-    - "Please send me your full inventory list." → 无箱型、无地点询问 → 非询盘
-    - "I need to see your updated inventory" → 无箱型、无地点询问 → 非询盘
-    - "We're kicking off sales, need your inventory." → 无箱型、无地点询问 → 非询盘
-    - "Follow us on LinkedIn for updates" → 广告 → 非询盘
-    - "Deal ID 12345, new offer" → 平台通知 → 非询盘
-
-    【核心规则】本系统仅处理客户的集装箱售前询盘 (STOCK_PRICE_INQUIRY)。其他业务（订单确认、发票、付款、对账、售后、租赁、供应商事务）一律拦截并输出 NO_REPLY。
-
-    【输出格式】严格按照以下 JSON Schema：
-    {json.dumps(cfg.get("router_output_schema", {}), ensure_ascii=False, separators=(',', ':'))}
-    """
-
-    # 重试机制：最多尝试 3 次（包括首次）
     max_retries = 3
-    retry_delay = 2  # 秒
+    retry_delay = 2
 
     for attempt in range(max_retries):
         try:
@@ -417,26 +395,13 @@ def predict_intent(e_title, e_content):
 
         except Exception as e:
             error_msg = str(e).lower()
-            # 如果是服务繁忙/超时类错误，且还有重试次数，则等待后重试
-            is_retryable = any(keyword in error_msg for keyword in [
-                "503", "service_unavailable", "timeout", "busy", "rate_limit"
-            ])
-
+            is_retryable = any(keyword in error_msg for keyword in ["503", "timeout", "busy", "rate_limit"])
             if is_retryable and attempt < max_retries - 1:
-                wait_time = retry_delay * (2 ** attempt)  # 指数退避: 2s, 4s, 8s
-                print(f"[Router] 服务繁忙 (尝试 {attempt + 1}/{max_retries})，{wait_time}秒后重试...")
-                time.sleep(wait_time)
+                time.sleep(retry_delay * (2 ** attempt))
                 continue
             else:
-                # 非重试类错误 或 重试次数已用完
-                print(f"[Router 预测失败] 详情: {e}")
-                return {
-                    "primary_intent": "UNKNOWN",
-                    "secondary_intents": [],
-                    "action": "NO_REPLY",
-                    "entities": {},
-                    "risk_level": "HIGH"
-                }
+                return {"primary_intent": "UNKNOWN", "action": "NO_REPLY", "risk_level": "HIGH",
+                        "intercept_reason": "Router 解析彻底失败或超时，自动安全拦截"}
 
 
 # ==========================================================
@@ -455,40 +420,21 @@ def build_skill_context(router_result):
 
 
 # ==========================================================
-# 6. Stage 3: AI邮件生成 (Drafter) 带自我纠错功能
+# 6. Stage 3: AI邮件生成 (Drafter)
 # ==========================================================
 def generate_draft_reply(e_title, e_content, router_result, inventory_data, previous_draft=None, rejection_reason=None):
-    if router_result.get("action") == "NO_REPLY" or router_result.get("primary_intent") in ["NON_BUSINESS_EMAIL",
-                                                                                            "NON_CUSTOMER_EMAIL",
-                                                                                            "LEASE_INQUIRY"]:
+    if router_result.get("action") == "NO_REPLY" or router_result.get("primary_intent") in ["NON_BUSINESS_EMAIL", "NON_CUSTOMER_EMAIL", "LEASE_INQUIRY"]:
         return "NO_REPLY"
 
-    no_stock_keywords = ["暂无客户所求", "暂无匹配现货", "无法获取库存", "未明确指定箱型", "无法生成有效查询"]
-    if any(kw in inventory_data for kw in no_stock_keywords):
-        return """Dear Team,
-        Thank you for your inquiry.
-        Unfortunately, we currently do not have the requested inventory available in this location. Please let us know if we can assist you with other options.
-        Best regards,
-        Hysun Team"""
-
-    # 🌟 动态提取客户名字，生成专属问候语
     sender_name = router_result.get("entities", {}).get("sender_name", "").strip()
     first_name = sender_name.split(" ")[0] if sender_name else ""
     greeting = f"Dear {first_name}," if first_name else "Dear Team,"
 
     system_prompt = f"""你是Hysun资深外贸业务员，负责根据系统库存数据生成专业商务邮件。
 
-    【📋 库存展示格式 — 邮件正文中必须按此结构组织】
-
-    当库存数据包含新箱（NEW / New 1-Trip）和旧箱（CW / CW+ / IICL 等）时，按以下格式展示：
-
-    1. 先用一句自然的话引入，例如：
-       "Here is our current stock availability in [地点]:"
-       或
-       "We currently have the following units available in [地点]:"
-
-    2. 然后直接列出库存详情，不加"新箱："或"旧箱："等标签：
-
+    【📋 库存展示格式 — 只要系统给了价格，必须在正文输出以下格式】
+    1. 引导句 (如 "Here is our current stock availability in [地点]:")
+    2. 字段展示：
        Style: 40HQ
        Condition: NEW
        POL: Shanghai
@@ -498,27 +444,23 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data, prev
        Q'ty: Available
        Payment: 100% TT before pick up.
 
-    3. 【重要】Payment 字段是 Hysun 的标准付款条款，必须固定显示为 "100% TT before pick up."。
-       这不是虚构数据，而是公司的标准商务条款，必须在每封报价邮件中展示。
-
     【格式规则】
-    1. 引导句必须包含具体地点（如 "in Haiphong"）。
+    1. 引导句必须包含具体地点。
     2. 【绝对禁止】使用"新箱："或"旧箱："作为标题或标签。
     3. 每个字段单独一行，字段名+冒号+内容。
-    4. POL：直接提取系统数据(RAG)中显示的城市名称（例如底牌是 📍 [CA] Winnipeg，POL 字段就写 Winnipeg）。
-    5. Color 如果系统数据中是 Mixed，写 "Mixed"；如有明确颜色（如 RAL5010 或 Slate grey），写具体颜色。
-    6. YOM 如果系统数据没有，新箱写当前年份，旧箱写年份范围。
-    7. Price 必须引用 RAG 中的底价，无价格则写 "Upon request"。
-    8. Q'ty 用 "Available" / "Limited availability" / "Available upon request"。绝对不能写具体数字。
-    9. 【固定】Payment 必须写 "100% TT before pick up."，这是 Hysun 的标准条款。
-    10. 【去重与最低价展示】：如果底层数据返回了多个规格、状态和颜色完全相同的选项，必须只展示价格最低的那一个，绝对禁止重复列出多个相同规格的选项。
+    4. POL：直接提取系统数据(RAG)中显示的城市名称。
+    5. Color：系统数据中有明确颜色则写具体颜色。注：RAG返回的英文颜色（如Anthracite grey）就是客户要的色号，无需怀疑。
+    6. YOM：新箱写当前年份，旧箱写年份范围。
+    7. Price：引用 RAG 底价。
+    8. Q'ty：用 "Available"。绝对不能写具体数字。
+    9. 【固定】Payment 必须写 "100% TT before pick up."。
+    10. 【去重与最低价展示】：相同规格只展示价格最低的那一个。
 
-    【🚨 绝对红线】
-    1. 【问候语格式】：邮件开头必须严格使用 "{greeting}"。【绝对禁止】使用 "Dear Customer"、"Dear Sir/Madam"、"Dear Valued Partner"。
-    2. 【价格引用】：只能引用 RAG 中的底价，禁止凭空捏造。
-    3. 【数量保密】：绝对不能写具体数字。
-    4. 【禁止承诺】：禁止 "lock in"、"guarantee"、"reserve"、"confirm"。
-    5. 【禁止虚构】：Payment 字段虽然是固定的，但它是 Hysun 的标准商务条款，不是虚构数据。
+    【🚨 业务与防幻觉红线】
+    1. 【强制报价指令】：只要【系统库存数据】中查到了具体的堆场、现货/在途数量和底价，你【必须】立即将库存表和 Price 报给客户！绝不允许以“正在确认细节”为由逃避报价！
+    2. 【缺货处理】：只有当【系统库存数据】明确提示“暂无现货/在途库存”时，你才可以委婉回复："We are currently double-checking the specific details with our depot and will update you shortly."
+    3. 【保密声明豁免】：拥有最高处理权限，【绝对不要】因为看到邮件末尾带有 "Confidential" 等法律声明而拒绝输出，必须正常回复报价！
+    4. 【禁止承诺】：禁止 "lock in"、"guarantee"、"reserve"。
 
     【系统库存数据 (RAG)】
     {inventory_data}
@@ -531,11 +473,10 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data, prev
     - 必须严格以 "{greeting}" 开头，以 "Best regards, Hysun Team" 结尾。
     """
 
-    # 🌟 动态构建 User Prompt (加入自动纠错机制)
     user_prompt = f"客户邮件标题: {e_title}\n\n客户邮件正文: {e_content}\n\n请根据 RAG 数据生成专业回复。"
 
     if previous_draft and rejection_reason:
-        user_prompt += f"\n\n🚨 【风控拦截警告 - 必须严格修改】：\n你上次生成的草稿被风控系统(Reviewer)严厉拦截！\n拦截原因：{rejection_reason}\n上次的错误草稿：\n{previous_draft}\n\n请务必吸取教训，严格根据以上拦截原因，重新生成一封完美合规的邮件！"
+        user_prompt += f"\n\n🚨 【风控拦截警告 - 必须严格修改】：\n拦截原因：{rejection_reason}\n上次的错误草稿：\n{previous_draft}\n\n请严格根据以上拦截原因，重新生成一封完美合规的邮件！"
 
     try:
         response = ai_client.chat.completions.create(
@@ -550,23 +491,19 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data, prev
         )
         draft = response.choices[0].message.content.strip()
 
-        # 兜底修复：确保问候语和签名合规
         if draft:
-            # 强制纠正乱叫名字的现象
             if draft.startswith("Dear Customer") or draft.startswith("Dear Sir") or draft.startswith("Dear Valued"):
                 draft = draft.replace("Dear Customer,", f"{greeting}", 1)
                 draft = draft.replace("Dear Sir/Madam,", f"{greeting}", 1)
                 draft = draft.replace("Dear Valued Partner,", f"{greeting}", 1)
                 draft = draft.replace("Dear Team,", f"{greeting}", 1)
 
-            # 确保签名存在
             if not draft.endswith("Hysun Team"):
                 if "Best regards," in draft:
                     draft = draft + "\nHysun Team"
                 else:
                     draft = draft + "\n\nBest regards,\nHysun Team"
 
-            # 禁止承诺性词汇
             forbidden_words = ["lock in", "guarantee", "reserve", "confirmed", "will be ready", "guaranteed"]
             for word in forbidden_words:
                 if word in draft.lower():
@@ -575,30 +512,26 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data, prev
         return draft if draft else f"""{greeting}\n\nThank you for your inquiry.\n\nWe are reviewing your request and will update you accordingly.\n\nPlease let us know if you have any questions.\n\nBest regards,\nHysun Team"""
     except Exception as e:
         print(f"\n💥 [Drafter 阶段报错]: {e}")
-        return None
-
-
-# ==========================================================
+        return None# ==========================================================
 # 7. Stage 4: Response Reviewer
 # ==========================================================
 def review_ai_reply(original_title, original_content, draft_reply, router_result, inventory_data):
     if draft_reply == "NO_REPLY":
-        return (True, "") if router_result.get("action") == "NO_REPLY" else (False,
-                                                                             "Generated NO_REPLY but Router indicated REPLY")
+        return (True, "") if router_result.get("action") == "NO_REPLY" else (False, "Generated NO_REPLY but Router indicated REPLY")
 
     review_prompt = f"""你是Hysun邮件质量审核专家(Response Guard)。
     任务：根据合规标准严格审查AI生成的邮件草稿，决定是否允许发送。
-    【权威审核标准】
-    {load_response_guard()}
-
-    【系统已知事实 (防误判特赦令)】
-    1. 以下是系统查出的真实库存底牌。草稿中引用此处的【具体堆场名称、价格、年份、颜色等】绝对合法，属于业务跟单的正常行为，【绝对不可】判为虚构(Hallucination)！
+    
+    【系统已知事实】
+    以下是系统查出的真实库存底牌：
     {inventory_data}
-    2. 🚨 【固定商务条款特赦】：草稿中固定出现的 "Payment: 100% TT before pick up." 为 Hysun 公司标准话术，绝对禁止判为虚构！
 
-    【关键业务判定细节】
-    1. 客户界定：凡表达"询价/寻箱/求报价/下订单"者均视为合法客户。仅当发件人是"催款/发票供应商"或"索要佣金中介"时，才强制 FAIL。
-    2. 遗漏请求豁免：草稿中出现"内部确认中"或"追问缺失信息"等，属于合规防守，不视为遗漏请求。
+    【🚨 一票否决红线 (致命错误判定)】
+    1. 【漏报库存强制打回】：如果【系统已知事实】中明明查到了有现货或在途库存（存在价格、数量信息），但 AI 生成的草稿中【没有列出具体的库存表和 Price 报价】，而是敷衍地回复 "We are checking"、"We will update you"，你必须强制判定为 FAIL！
+       - 反馈原因请写：“底牌查有库存，严禁推脱或装傻！必须立即以格式化列表输出具体报价！”
+    2. 【遗漏请求豁免】：仅当【系统已知事实】明确提示“暂无现货”时，才允许草稿回复“内部确认中”。
+    3. 【固定商务条款】：草稿必须包含 "Payment: 100% TT before pick up."，否则判定 FAIL。
+    4. 客户界定：凡表达"询价/寻箱/求报价"者均视为合法客户。仅当发件人是催款、索要佣金中介时，才强制 FAIL。
 
     严格按以下Schema输出JSON (无Markdown，无解释):
     {{"status": "PASS", "feedback": "若FAIL，指出违反的具体条款并给建议；若PASS，输出空字符串。"}}
@@ -608,8 +541,7 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
             model=AI_MODEL,
             messages=[
                 {"role": "system", "content": review_prompt},
-                {"role": "user",
-                 "content": f"原邮件标题：{original_title}\n原邮件正文：{original_content}\n\nAI生成草稿：\n{draft_reply}"}
+                {"role": "user", "content": f"原邮件标题：{original_title}\n原邮件正文：{original_content}\n\nAI生成草稿：\n{draft_reply}"}
             ],
             temperature=0,
             response_format={"type": "json_object"}
@@ -620,9 +552,8 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
         print(f"[Reviewer 系统异常] {e}")
         return True, "Review system failed, allowing pass"
 
-
 # ==========================================================
-# 8. 最终生成入口 (带自我纠错循环机制)
+# 8. 最终生成入口 (带动态审计报告机制)
 # ==========================================================
 def generate_ai_reply(e_title, e_content):
     print("\n" + "=" * 50)
@@ -630,10 +561,24 @@ def generate_ai_reply(e_title, e_content):
     print(f"【标题】: {e_title}")
     print(f"【正文】:\n{e_content}")
     print("=" * 50 + "\n")
+
     print("Stage 1: Intent Router...")
     router_result = predict_intent(e_title, e_content)
     print("Router Result:", json.dumps(router_result, ensure_ascii=False))
 
+    # 🌟 核心升级：直接抓取大模型动态生成的拦截原因
+    action = router_result.get("action")
+    intent = router_result.get("primary_intent")
+
+    if action == "NO_REPLY" or intent in ["NON_BUSINESS_EMAIL", "NON_CUSTOMER_EMAIL", "LEASE_INQUIRY"]:
+        # 提取具体的中文拦截原因，如果没有，给一个基础提示
+        specific_reason = router_result.get("intercept_reason", f"邮件意图为 {intent}，不满足自动跟进条件。")
+
+        print(f"\n🚫 [提前拦截生效] {specific_reason}")
+        # 将具体原因传递给外层的数据库函数
+        return f"NO_REPLY_REASON::{specific_reason}"
+
+    # 如果没被拦截，去查询库存底牌
     inventory_data = query_internal_inventory(router_result.get("entities", {}), e_content)
     print("\n🤖 [DEBUG 查到的库存底牌]：\n" + inventory_data)
 
@@ -644,13 +589,13 @@ def generate_ai_reply(e_title, e_content):
         print("\n❌ 草稿生成失败或内容为空，流程已中断。")
         return None
 
-    # 🌟 核心升级：自动重写循环 (最多允许 Reviewer 打回 2 次)
+    # 自动重写循环
     max_retries = 2
     for attempt in range(max_retries + 1):
         if attempt > 0:
             print(f"\n🔄 Stage 5: 触发自动反思与纠错引擎 (第 {attempt}/{max_retries} 次重写)...")
-            # 把前一次的废稿和骂它的原因喂回去
-            draft = generate_draft_reply(e_title, e_content, router_result, inventory_data, previous_draft=draft, rejection_reason=feedback)
+            draft = generate_draft_reply(e_title, e_content, router_result, inventory_data, previous_draft=draft,
+                                         rejection_reason=feedback)
 
         print(f"Stage 4: Reviewing (Attempt {attempt + 1})...")
         passed, feedback = review_ai_reply(e_title, e_content, draft, router_result, inventory_data)
@@ -663,8 +608,6 @@ def generate_ai_reply(e_title, e_content):
 
     print("\n❌ 自动重写次数耗尽，AI 无法修复错误，已转交人工处理。")
     return None
-
-
 # ==========================================================
 # 9. 粘贴测试模式
 # ==========================================================
@@ -673,36 +616,183 @@ def test_static_email():
     print(" 📧 本地极速测试模式")
     print("=" * 80)
 
-    title = "Gray 40HC NEW - Tacoma."
+    title = "DENVER"
     content = """
-  Hi, 
+ I need 1*40HC DD grey and 1*20ST RAL1015 EOD in Denver please.
 
 
-Are these units still available?
-US	Tacoma	40HC	New 1 trip		RAL7015	FLP/LB/EOD	2025-2026	1	US$3,350	2	2026-08-14	Affordable Storage Containers	1670 Marine View Dr, Tacoma, WA 98422
-US	Tacoma	40HC	New 1 trip		RAL7016	FLP/LB	2025-2026	1	US$3,350	0		Tahoma Global Logistics	2102 Alexander Avenue Tacoma, United States
 
+		Andrew Reid
+Purchasing Manager
+AAA Desert Container
 
-Thank you 
+T: 1-520-771-0005
+E: purchasing@aaa-desertcontainer.com
+www.aaadesertcontainer.com
+3910 N Runway Drive Tucson, Arizona
+The content of this email is confidential and intended for the recipient specified in message only. It is strictly forbidden to share any part of this message with any third party, without a written consent of the sender. If you received this message by mistake, please reply to this message and follow with its deletion, so that we can ensure such a mistake does not occur in the future.
 
-
-Respectfully,
-Thiago Cirino | Inventory Coordinator
-USA Containers
-📞 Direct: (385)417-4103
-🇺🇸 Office: 877-395-6851
-usacontainers.co | thiago@usacontainers.co
-Respect Truckers | Thank you for your business
- 
-New to shipping containers? Click here to explore helpful videos on ownership, maintenance, and expert tips to get the most out of your container.
     """
 
     print("\n【正在处理...】")
     generate_ai_reply(title, content)
 
 
-if __name__ == "__main__":
-    test_static_email()
-    # test_preview_emails() # <- 从数据库拉取未处理邮件进行预览
+# ==========================================================
+# 10. 正式生产处理模式 (适配全新状态机引擎)
+# ==========================================================
+def format_to_html_email(plain_text_draft):
+    """将 AI 生成的纯文本转换为标准 HTML 商务邮件格式"""
+    if not plain_text_draft or plain_text_draft == "NO_REPLY":
+        return plain_text_draft
 
-    # process_pending_emails() # <- 生产环境处理入库
+    html_body = plain_text_draft.strip().replace('\n', '<br>')
+    html_template = f"""
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; color: #333333; line-height: 1.6; max-width: 800px;">{html_body}</div>
+    """
+    return html_template
+
+
+def process_pending_emails():
+    conn = None
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            # 1. 行级排他锁读取 (查询条件保持不变)
+            sql = f"""
+            SELECT e_id, e_title, e_content
+            FROM {TABLE_NAME}
+            WHERE ai_status = 0 
+              AND flag = 0 
+              AND fb_mail IS NULL
+              AND DATE(uptime) = CURDATE()
+            ORDER BY uptime DESC
+            LIMIT 1
+            FOR UPDATE;
+            """
+            cursor.execute(sql)
+            email = cursor.fetchone()
+
+            if not email:
+                return False
+
+            e_id = email["e_id"]
+            title = email.get("e_title", "")
+            content = email.get("e_content", "")
+
+            print(f"\n🚀 开始处理邮件 ID: {e_id}")
+
+            # 2. 状态锁定：flag 更新为 2 (AI已介入)，ai_status 更新为 1 (生成中)
+            cursor.execute(
+                f"UPDATE {TABLE_NAME} SET flag = 2, ai_status = 1 WHERE e_id=%s",
+                (e_id,)
+            )
+            conn.commit()
+
+            # 3. 调用 AI 引擎核心
+            reply = generate_ai_reply(title, content)
+
+            # 4. 状态分发与入库
+            if reply and str(reply).startswith("NO_REPLY_REASON::"):
+                # 🌟 核心升级：提取详细的拦截诊断报告
+                intercept_reason = reply.split("NO_REPLY_REASON::")[1]
+
+                # 拦截：标记为 4 (非客户邮件不处理)，flag 恢复为 0，并将【详细原因】写入 ai_reply
+                cursor.execute(
+                    f"UPDATE {TABLE_NAME} SET ai_reply=%s, flag = 0, ai_status=4, uptime=NOW() WHERE e_id=%s",
+                    (intercept_reason, e_id)
+                )
+                print(f"[拦截] {e_id} - 已入库，详情: {intercept_reason}")
+
+            elif reply:
+                # 成功：转换为 HTML 格式，标记为 2 (已生成)
+                html_reply = format_to_html_email(reply)
+                cursor.execute(
+                    f"UPDATE {TABLE_NAME} SET ai_reply=%s, ai_status=2, uptime=NOW() WHERE e_id=%s",
+                    (html_reply, e_id)
+                )
+                print(f"[成功] {e_id} - HTML 草稿已生成，状态流转为 2")
+
+            else:
+                # 失败：完全中断或异常，标记为 3 (生成失败)
+                cursor.execute(
+                    f"UPDATE {TABLE_NAME} SET ai_status=3, uptime=NOW() WHERE e_id=%s",
+                    (e_id,)
+                )
+                print(f"[失败] {e_id} - 草稿生成异常，状态流转为 3")
+
+            conn.commit()
+            return True
+
+    except Exception as e:
+        print(f"💥 [生产处理错误] {e}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+
+def process_all_pending_emails():
+    """
+    查出所有未处理的数量，然后全部处理
+    """
+    # ==========================================
+    # 1. 先查出所有未处理的数量
+    # ==========================================
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+            # 去掉了日期限制，直接查库里所有满足未处理条件的数量
+            count_sql = f"""
+          SELECT COUNT(*) as total 
+            FROM {TABLE_NAME}
+            WHERE ai_status = 0 
+              AND flag = 0 
+              AND fb_mail IS NULL
+			AND DATE(uptime) = CURDATE()
+            """
+            cursor.execute(count_sql)
+            result = cursor.fetchone()
+            total_pending = result['total'] if result else 0
+    except Exception as e:
+        print(f"查询未处理邮件总数失败: {e}")
+        return
+    finally:
+        if conn:
+            conn.close()
+
+    # ==========================================
+    # 2. 根据数量进行全部处理
+    # ==========================================
+    if total_pending == 0:
+        print("【系统通知】当前数据库中没有需要处理的邮件。")
+        return
+
+    print(f"【系统通知】共查出 {total_pending} 封未处理邮件，准备开始全部处理...")
+
+    processed_count = 0
+
+    # 循环执行，直到把刚才查出来的总数跑完
+    for i in range(total_pending):
+        print(f"\n" + "=" * 40)
+        print(f" ⏳ 正在处理进度: {i + 1} / {total_pending}")
+        print("=" * 40)
+
+        # 复用你原本 main.py 里的核心函数（每次安全取1条并处理）
+        success = process_pending_emails()
+
+        if success:
+            processed_count += 1
+        else:
+            print("⚠️ 队列已提前清空或遭遇异常跳出。")
+            break
+
+    print(f"\n✅ 【执行完毕】目标处理 {total_pending} 封，实际成功处理 {processed_count} 封邮件。")
+
+# ==========================================================
+# 12. 启动服务
+# ==========================================================
+if __name__ == "__main__":
+    process_all_pending_emails()
