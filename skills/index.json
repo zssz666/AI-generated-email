@@ -286,17 +286,27 @@
     "secondary_intents": ["string"],
     "action": "REPLY/NO_REPLY",
     "entities": {
-        "container_type": "string",
-        "requested_color": "string",
-        "requested_condition": "string",
-        "container_number": "string",
-        "invoice_number": "string",
-        "pi_number": "string",
-        "release_code": "string",
-        "company_role": "customer/vendor/intermediary",
-        "target_location": "string",
-        "sender_name": "string"
-    },
+    "container_type": "string",
+    "requested_color": "string",
+    "requested_condition": "string",
+    "container_number": "string",
+    "invoice_number": "string",
+    "pi_number": "string",
+    "release_code": "string",
+    "company_role": "customer/vendor/intermediary",
+    "target_location": "string",
+    "sender_name": "string",
+      "requested_quantity": 0,
+    "line_items": [{
+    "container_type": "",
+    "condition": "",
+    "color": "",
+    "location": "",
+    "quantity": 0
+}]
+
+},
+
     "risk_level": "LOW/MEDIUM/HIGH"
 }
 
