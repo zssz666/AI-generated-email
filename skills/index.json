@@ -1,314 +1,136 @@
 {
   "version": "3.0",
-
   "global_rules_file": "global_rules.md",
-
   "response_guard_file": "response_guard.md",
-
   "entity_rules_file": "entity_rules.md",
-
-
   "router_config": {
-
     "multi_intent": true,
-
     "max_secondary_intents": 3,
-
-
     "intent_priority": [
-
       "NON_BUSINESS_EMAIL",
-
       "BANK_ACCOUNT_CHANGE_REQUEST",
-
       "URGENT_PAYMENT_CHANGE",
-
       "PAYMENT_RISK_CHECK",
-
+      "STRATEGIC_BULK_INQUIRY",
       "VENDOR_INVOICE_RELEASE_REQUEST",
-
       "PAYMENT_CONFIRMATION_REQUEST",
-
       "VENDOR_PAYMENT_REMINDER",
-
       "COMPLAINT_CONDITION",
-
       "ORDER_CANCELLATION",
-
       "ORDER_CONFIRM_INVOICE"
-
     ]
-
   },
-
-
   "non_business_config": {
-
-
     "enabled": true,
-
-
     "intent": "NON_BUSINESS_EMAIL",
-
-
     "action": "NO_REPLY",
-
-
     "priority": "HIGHEST",
-
-
     "signals": [
-
       "Deal ID",
-
       "Deal summary",
-
       "New offer",
-
       "sent you a message",
-
       "confirmed an offer",
-
       "Reply Now",
-
       "React to offer",
-
       "Visit our Website",
-
       "Follow us on LinkedIn",
-
       "Schedule a demo",
-
       "Newsletter",
-
       "Promotion",
-
       "Advertisement"
-
     ],
-
-
     "sources": [
-
       "xChange Solutions",
-
       "Trading platform",
-
       "Marketplace notification",
-
       "Alibaba notification",
-
       "LinkedIn notification"
-
     ]
-
   },
-
-
-
   "intent_to_module": {
-
-
     "NON_BUSINESS_EMAIL": null,
-
-
-
-    "STOCK_PRICE_INQUIRY":
-    "modules/01_sales_inquiry.md",
-
-
-    "QUOTE_ACKNOWLEDGMENT":
-    "modules/01_sales_inquiry.md",
-
-
-
-    "ORDER_CONFIRM_INVOICE":
-    "modules/02_order_and_commission.md",
-
-
-    "INTERMEDIARY_COMMISSION_ORDER":
-    "modules/02_order_and_commission.md",
-
-
-    "EXTENSION_REQUEST":
-    "modules/02_order_and_commission.md",
-
-
-
-    "RELEASE_STATUS_CHECK":
-    "modules/03_fulfillment_and_ops.md",
-
-
-    "OWNERSHIP_TRANSFER_TRACKING":
-    "modules/03_fulfillment_and_ops.md",
-
-
-    "DOCUMENT_REQUEST":
-    "modules/03_fulfillment_and_ops.md",
-
-
-    "PICKUP_SCHEDULE_REQUEST":
-    "modules/03_fulfillment_and_ops.md",
-
-
-
-    "COMPLAINT_CONDITION":
-    "modules/04_complaint_and_aftersales.md",
-
-
-    "ORDER_CANCELLATION":
-    "modules/04_complaint_and_aftersales.md",
-
-
-    "COST_NEGOTIATION":
-    "modules/04_complaint_and_aftersales.md",
-
-
-
-    "VENDOR_PAYMENT_REMINDER":
-    "modules/05_vendor_finance_soa.md",
-
-
-
-    "VENDOR_INVOICE_RECEIVED":
-    "modules/06_vendor_procurement.md",
-
-
-    "VENDOR_INVOICE_RELEASE_REQUEST":
-    "modules/06_vendor_procurement.md",
-
-
-    "BANK_ACCOUNT_CHANGE_REQUEST":
-    "modules/06_vendor_procurement.md",
-
-
-    "DUPLICATE_INVOICE_REPORT":
-    "modules/06_vendor_procurement.md",
-
-
-    "URGENT_PAYMENT_CHANGE":
-    "modules/06_vendor_procurement.md",
-
-
-
-    "PAYMENT_STATUS_INQUIRY":
-    "modules/07_finance_payment.md",
-
-
-    "PAYMENT_CONFIRMATION_REQUEST":
-    "modules/07_finance_payment.md",
-
-
-    "WIRE_PROOF_REQUEST":
-    "modules/07_finance_payment.md",
-
-
-    "PAYMENT_RISK_CHECK":
-    "modules/07_finance_payment.md"
-
-
+    "STRATEGIC_BULK_INQUIRY": null,
+    "STOCK_PRICE_INQUIRY": "modules/01_sales_inquiry.md",
+    "QUOTE_ACKNOWLEDGMENT": "modules/01_sales_inquiry.md",
+    "ORDER_CONFIRM_INVOICE": "modules/02_order_and_commission.md",
+    "INTERMEDIARY_COMMISSION_ORDER": "modules/02_order_and_commission.md",
+    "EXTENSION_REQUEST": "modules/02_order_and_commission.md",
+    "RELEASE_STATUS_CHECK": "modules/03_fulfillment_and_ops.md",
+    "OWNERSHIP_TRANSFER_TRACKING": "modules/03_fulfillment_and_ops.md",
+    "DOCUMENT_REQUEST": "modules/03_fulfillment_and_ops.md",
+    "PICKUP_SCHEDULE_REQUEST": "modules/03_fulfillment_and_ops.md",
+    "COMPLAINT_CONDITION": "modules/04_complaint_and_aftersales.md",
+    "ORDER_CANCELLATION": "modules/04_complaint_and_aftersales.md",
+    "COST_NEGOTIATION": "modules/04_complaint_and_aftersales.md",
+    "VENDOR_PAYMENT_REMINDER": "modules/05_vendor_finance_soa.md",
+    "VENDOR_INVOICE_RECEIVED": "modules/06_vendor_procurement.md",
+    "VENDOR_INVOICE_RELEASE_REQUEST": "modules/06_vendor_procurement.md",
+    "BANK_ACCOUNT_CHANGE_REQUEST": "modules/06_vendor_procurement.md",
+    "DUPLICATE_INVOICE_REPORT": "modules/06_vendor_procurement.md",
+    "URGENT_PAYMENT_CHANGE": "modules/06_vendor_procurement.md",
+    "PAYMENT_STATUS_INQUIRY": "modules/07_finance_payment.md",
+    "PAYMENT_CONFIRMATION_REQUEST": "modules/07_finance_payment.md",
+    "WIRE_PROOF_REQUEST": "modules/07_finance_payment.md",
+    "PAYMENT_RISK_CHECK": "modules/07_finance_payment.md"
   },
-
-
-
   "secondary_intent_rules": {
-
-
     "VENDOR_INVOICE_RECEIVED": [
-
       "WIRE_PROOF_REQUEST",
-
       "PICKUP_SCHEDULE_REQUEST",
-
       "PAYMENT_CONFIRMATION_REQUEST"
-
     ],
-
-
-
     "VENDOR_INVOICE_RELEASE_REQUEST": [
-
       "WIRE_PROOF_REQUEST",
-
       "PICKUP_SCHEDULE_REQUEST",
-
       "PAYMENT_CONFIRMATION_REQUEST"
-
     ],
-
-
-
     "ORDER_CONFIRM_INVOICE": [
-
       "DOCUMENT_REQUEST",
-
       "PICKUP_SCHEDULE_REQUEST"
-
     ],
-
-
-
     "PAYMENT_CONFIRMATION_REQUEST": [
-
       "WIRE_PROOF_REQUEST"
-
     ],
-
-
-
     "BANK_ACCOUNT_CHANGE_REQUEST": [
-
       "PAYMENT_RISK_CHECK"
-
     ]
-
-
   },
-
-
-
   "risk_intents": [
-
     "BANK_ACCOUNT_CHANGE_REQUEST",
-
     "URGENT_PAYMENT_CHANGE",
-
     "PAYMENT_RISK_CHECK",
-
     "THIRD_PARTY_PAYMENT_REQUEST",
-
     "CRYPTO_PAYMENT_REQUEST"
-
   ],
-
- "router_output_schema": {
-    "primary_intent": "string",
-    "secondary_intents": ["string"],
+  "router_output_schema": {
+    "primary_intent": "string (e.g. STOCK_PRICE_INQUIRY, STRATEGIC_BULK_INQUIRY, NON_BUSINESS_EMAIL)",
+    "secondary_intents": [
+      "string"
+    ],
     "action": "REPLY/NO_REPLY",
     "entities": {
-    "container_type": "string",
-    "requested_color": "string",
-    "requested_condition": "string",
-    "container_number": "string",
-    "invoice_number": "string",
-    "pi_number": "string",
-    "release_code": "string",
-    "company_role": "customer/vendor/intermediary",
-    "target_location": "string",
-    "sender_name": "string",
+      "container_type": "string",
+      "requested_color": "string",
+      "requested_condition": "string",
+      "container_number": "string",
+      "invoice_number": "string",
+      "pi_number": "string",
+      "release_code": "string",
+      "company_role": "customer/vendor/intermediary",
+      "target_location": "string",
+      "sender_name": "string",
       "requested_quantity": 0,
-    "line_items": [{
-    "container_type": "",
-    "condition": "",
-    "color": "",
-    "location": "",
-    "quantity": 0
-}]
-
-},
-
+      "line_items": [
+        {
+          "container_type": "",
+          "condition": "",
+          "color": "",
+          "location": "",
+          "quantity": 0
+        }
+      ]
+    },
     "risk_level": "LOW/MEDIUM/HIGH"
-}
-
-
+  }
 }
