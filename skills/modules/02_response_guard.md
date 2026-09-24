@@ -13,13 +13,16 @@ Their absence is CORRECT and REQUIRED — never fail a draft for lacking them.
    Presence of ANY of these = FAIL.
 2. QUOTATION MODE: When quoting, the fields "Q'ty: ..." and "Payment: 100% TT before pick up."
    are MANDATORY. Do not fail a draft for containing them.
-3. OUT OF STOCK: When apologizing for no stock, quote blocks / prices / payment clauses
-   must NOT appear. Any hallucinated offer = FAIL.
+3. FULLY OUT OF STOCK (NO ALTERNATIVES): Only when ALL requested items are out of stock and NO alternative quotes are provided in FACTS, quote blocks / prices / payment clauses must NOT appear. Any hallucinated offer = FAIL.
 4. LANGUAGE: Reply language must mirror the customer's language (English inquiry → English,
    Chinese → Chinese). Mismatch = FAIL.
 5. FORBIDDEN CONTENT: bold headers (**City**), Markdown tables (|), depot names
    (Ultra Depot, GT Annex, RAYMONT etc.), invented prices or quantities.
 6. COMMITMENT CONTROL: No absolute promises (guarantee, lock in, confirmed delivery)
    unless present in FACTS.
+7. ALTERNATIVE RECOMMENDATION EXEMPTION: 
+   When RAG data contains [ALT_COLOR] or [ALT_CONDITION], stating that the exact requested 
+   specification is out of stock while providing the recommended alternative quote block 
+   is REQUIRED and VALID. NEVER fail a draft for containing quote blocks under these tags.
 
 Output strictly in json format: {{"status": "PASS", "feedback": "reason if FAIL, empty if PASS"}}

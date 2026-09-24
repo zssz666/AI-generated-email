@@ -14,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ==========================================================
-# 0. 自动化日志系统
+# 0. 自动化日志系统 (控制台与文件双写)
 # ==========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
@@ -132,7 +132,6 @@ HYSUN_CONDITIONS = {1: "NEW", 2: "New 1 trip", 3: "New-IICL", 4: "IICL", 5: "CW"
 
 QUALITY_PRIORITY_ORDER = ["NEW", "New 1 trip", "New-IICL", "IICL", "CW+", "CW", "WWT", "ASIS"]
 
-# 🌟 新增：特种箱关键词表（用于扁平模式兜底判断）
 SPECIAL_KEYWORDS = ["DD", "OS", "RF", "OT", "FR", "HT", "PW", "TK",
                     "OPEN", "DOUBLE", "REEFER", "FLAT", "HARD", "TUNNEL", "SIDE", "TANK"]
 
@@ -231,17 +230,23 @@ def parse_idcode_details(idcode: str):
 def encode_search_idcode(raw_type, color_param="", condition_param="", flp="_", lb="_", eod="_"):
     if not raw_type:
         return ""
-    color_code = re.search(r'\d{4}', color_param).group() if color_param and re.search(r'\d{4}',
-                                                                                       color_param) else "____"
+    color_code = re.search(r'\d{4}', str(color_param)).group() if color_param and re.search(r'\d{4}',
+                                                                                            str(color_param)) else "____"
     type_code = "__"
-    desc = str(raw_type).lower().replace("'", "").replace(" ", "").replace("-", "") \
+
+    raw_type_clean = re.sub(r'(?i)(\d+)\s*doors?', r'\1d', str(raw_type))
+    desc = str(raw_type_clean).lower().replace("'", "").replace(" ", "").replace("-", "") \
         .replace("gp", "dc").replace("dv", "dc").replace("reefer", "rf").replace("opentop", "ot") \
         .replace("openside", "os").replace("doubledoor", "dd").replace("flatrack", "fr").replace("hardtop", "ht")
+
+    desc = re.sub(r'(\d+)(dc)(dd|os|rf|ot|fr|ht|pw|fos)', r'\1\3', desc)
+
     special_mapping = {"20rf": "20dcrf", "40rf": "40hcrf", "45rf": "45hcrf", "20ot": "20dcot",
                        "40ot": "40dcot", "40hcot": "40hcot", "20fr": "20dcfr", "40fr": "40hcfr",
                        "20ht": "20dcht", "40ht": "40hcht", "20dd": "20dcdd", "40dd": "40hcdd",
                        "20os": "20dcos", "40os": "40hcos", "20pw": "20hcpw", "40pw": "40hcpw"}
     desc = special_mapping.get(desc, desc)
+
     container_map = fetch_system_container_types()
     if container_map:
         if desc in container_map:
@@ -251,12 +256,14 @@ def encode_search_idcode(raw_type, color_param="", condition_param="", flp="_", 
                 if key in desc:
                     type_code = container_map[key]
                     break
+
     reverse_cond_map = {"NEW": "1", "BRANDNEW": "1", "NEW1TRIP": "2", "1TRIP": "2", "ONEWAY": "2",
                         "SINGLETRIP": "2", "NEWIICL": "3", "IICL": "4", "CW+": "9", "CWPLUS": "9",
                         "CW": "5", "CARGOWORTHY": "5", "CWWWT": "6", "WWT": "7",
                         "WINDANDWATERTIGHT": "7", "ASIS": "8", "DAMAGED": "8"}
-    condition_code = reverse_cond_map.get(condition_param.upper().replace(" ", "").replace("-", ""), "_") \
+    condition_code = reverse_cond_map.get(str(condition_param).upper().replace(" ", "").replace("-", ""), "_") \
         if condition_param else "_"
+
     return f"{color_code}{type_code}{condition_code}{flp}{lb}{eod}"
 
 
@@ -291,30 +298,27 @@ def parse_locations_and_relation(loc_str: str):
 
 
 def clean_draft_text(draft: str) -> str:
-    """统一防脱敏清洗函数"""
+    """统一防脱敏清洗函数：清洗中英文邮件主题、称呼与落款"""
     draft = re.sub(r'(?i)^\s*\*\*[A-Za-z\s]+\*\*\s*\n+', '', draft, flags=re.MULTILINE)
     draft = re.sub(r'(?i)^\s*\*\*?Subject:?.*?\n+', '', draft, flags=re.MULTILINE)
-    draft = re.sub(r'(?i)^\s*Dear\s+[^,\n]+,?\n+', '', draft, flags=re.MULTILINE)
 
-    # 🌟 落款切除 v2：仅当签收语出现在【行首】时才切到文末，
-    #    彻底避免误伤正文中出现的小写 sincerely apologize / regards 等词组
+    # 英文称呼过滤
+    draft = re.sub(r'(?i)^\s*Dear\s+[^,\n]+,?\n+', '', draft, flags=re.MULTILINE)
+    # 中文称呼过滤
+    draft = re.sub(r'^\s*(?:尊敬的[^\n，,：:]+[，,：:]|您好[！!，,：:]?|你好[！!，,：:]?)\s*\n+', '', draft, flags=re.MULTILINE)
+
+    # 中英文落款过滤
     _SIGNOFF = (
         r'thank you and best regards|thanks and regards|thank you and regards|'
         r'best regards|kind regards|warmest regards|warm regards|'
-        r'sincerely yours|yours sincerely|sincerely|regards|best wishes'
+        r'sincerely yours|yours sincerely|sincerely|regards|best wishes|'
+        r'祝好|此致敬礼|顺祝商祺|祝商祺|顺祝冬安|顺祝秋安|顺颂商祺|敬祝商祺'
     )
-    draft = re.sub(
-        rf'(?im)^[ \t]*({_SIGNOFF})\b[^\n]*\n?[\s\S]*$',
-        '', draft)
-
+    draft = re.sub(rf'(?im)^[ \t]*({_SIGNOFF})[^\n]*\n?[\s\S]*$', '', draft)
     draft = re.sub(r'\[Your\s+[^\]]+\]', '', draft, flags=re.IGNORECASE)
     return draft.strip()
 
 
-
-# ==========================================================
-# 🌟 3.5 RAG 场景判定助手（单一事实来源）
-# ==========================================================
 def rag_has_quotes(inv):      return "Price: USD" in inv
 
 
@@ -327,11 +331,8 @@ def rag_missing_info(inv):    return ("强制阻断" in inv) or ("未提供明�
 def rag_all_nostock(inv):     return rag_has_nostock(inv) and not rag_has_quotes(inv)
 
 
-# ==========================================================
-# 🌟 3.6 颜色解析 / 特种箱展开 / 分项检索辅助
-# ==========================================================
 def resolve_color_codes(color_name: str):
-    """将客户颜色名称解析为系统4位颜色代码列表；无法识别返回 [] 表示通配"""
+    """将客户颜色名称解析为系统4位颜色代码列表；无法识别返回 [] 表示非标冷门色"""
     name = (color_name or "").strip()
     if not name:
         return []
@@ -353,21 +354,35 @@ def resolve_color_codes(color_name: str):
 
 
 def expand_special_variants(single_type: str):
-    """★ 客户点名的变体永远第一位，细分变体仅作缺货时兜底"""
+    """客户点名的门扇变体永远第一位，其余细分变体仅作缺货平替顺推"""
     t = (single_type or "").strip()
-    tc = t.upper().replace(" ", "").replace("-", "")
-    q = [t]                                   # ← 精确请求置顶
+    t_norm = re.sub(r'(?i)(\d+)\s*doors?', r'\1D', t)
+    tc = t_norm.upper().replace(" ", "").replace("-", "")
+
+    q = [t_norm]
     if any(x in tc for x in ["OS", "SIDE", "OPEN"]):
         if "40HC" in tc:
-            q += ["40HC OS FOS", "40HC OS 4D", "40HC OS 3D", "40HC OS 2D", "40HC OS 1D"]
+            if "4D" in tc:
+                q = ["40HC OS 4D", "40HC OS FOS", "40HC OS 3D", "40HC OS 2D", "40HC OS 1D"]
+            elif "FOS" in tc:
+                q = ["40HC OS FOS", "40HC OS 4D", "40HC OS 2D"]
+            elif "2D" in tc:
+                q = ["40HC OS 2D", "40HC OS 4D", "40HC OS FOS"]
+            else:
+                q += ["40HC OS 4D", "40HC OS FOS", "40HC OS 3D", "40HC OS 2D", "40HC OS 1D"]
         elif "20DC" in tc:
-            q += ["20DC OS FOS", "20DC OS 4D", "20DC OS 2D"]
+            if "4D" in tc:
+                q = ["20DC OS 4D", "20DC OS FOS", "20DC OS 2D"]
+            elif "FOS" in tc:
+                q = ["20DC OS FOS", "20DC OS 4D", "20DC OS 2D"]
+            else:
+                q += ["20DC OS 4D", "20DC OS FOS", "20DC OS 2D"]
         elif "20HC" in tc:
             q.append("20HC OS FOS")
+
     seen = set()
     return [x for x in q if x.strip()
             and not (x.upper().replace(" ", "") in seen or seen.add(x.upper().replace(" ", "")))]
-
 
 
 def _city_lookup_params(city_location):
@@ -382,8 +397,8 @@ def _city_lookup_params(city_location):
             d_city_val = city_loc
     return city_loc, area_code, country_codes, d_city_val
 
+
 def _num(item, *keys):
-    """按优先级取第一个正数 —— 防御接口键名漂移（教训：oPrince）"""
     for k in keys:
         try:
             v = float(item.get(k))
@@ -393,128 +408,234 @@ def _num(item, *keys):
             return v
     return 0.0
 
+
 PRICE_KEYS = ("oPrice", "oPrince", "price", "Price")
 ONGROUND_KEYS = ("onground", "onGround", "Pick Up")
 UPCOMING_KEYS = ("upcoming", "upComing", "UpComing")
 
-def _find_best_quote_for_item(target_city, single_type, requested_condition, color_codes,
-                              api_url, headers):
-    """城市×类型×颜色×箱况 四层队列检索；命中返回 {ground_quote, transit_quotes}，未命中返回 None
-    ★ 在场/在途双轨独立选优，互不备选：oPrince只对应onground，uPrice只对应upcoming+eta"""
+
+# ==========================================================
+# 🌟 3.7 核心三级级联查找状态机 (带轻量缓存 + 变体平替全量日志)
+# ==========================================================
+def _query_single_stock(target_city, target_type, target_cond, color_code, api_url, headers, query_cache=None):
+    cache_key = (str(target_city).lower(), str(target_type).lower(), str(target_cond).lower(), str(color_code))
+    if query_cache is not None and cache_key in query_cache:
+        return query_cache[cache_key]
+
     city_location, area_code, country_codes, d_city_val = _city_lookup_params(target_city)
     is_china = (area_code == 2 or any(cn in city_location.lower() for cn in
                                       ["shanghai", "ningbo", "qingdao", "tianjin", "shenzhen", "guangzhou", "xiamen",
                                        "dalian"]))
-    type_queue = expand_special_variants(single_type)
-    conditions_queue = [requested_condition] if requested_condition else []
-    req_clean = (requested_condition or "").upper().replace(" ", "").replace("-", "")
-    for cand in QUALITY_PRIORITY_ORDER:
-        cc = cand.upper().replace(" ", "").replace("-", "")
-        if cc != req_clean and cand not in conditions_queue:
-            conditions_queue.append(cand)
-    color_queue = [c for c in color_codes if c] + [""]
 
-    for current_type in type_queue:
-        for current_color in color_queue:
-            for current_cond in conditions_queue:
-                search_idcode = encode_search_idcode(current_type, current_color, current_cond)
-                payload = {"idCodes": search_idcode, "dCity": d_city_val, "dCountry": country_codes,
-                           "yardName": "", "area": area_code, "page": 1, "limit": 5, "date": [],
-                           "resource": "", "cargo": "", "xcHid": 0, "xcUid": 0,
-                           "raioxcHid": 0, "raioxcUid": 0, "inventory": 0}
-                try:
-                    response = global_session.post(api_url, json=payload, headers=headers, timeout=5)
-                    if not (response.status_code == 200 and response.text.strip()):
-                        continue
-                    page_data = response.json().get("obj", {}).get("page", [])
+    search_idcode = encode_search_idcode(target_type, color_code, target_cond)
+    payload = {"idCodes": search_idcode, "dCity": d_city_val, "dCountry": country_codes,
+               "yardName": "", "area": area_code, "page": 1, "limit": 10, "date": [],
+               "resource": "", "cargo": "", "xcHid": 0, "xcUid": 0,
+               "raioxcHid": 0, "raioxcUid": 0, "inventory": 0}
 
-                    # ★ 双轨容器
-                    best_ground = None        # 在场最优（跨记录取最低 oPrince）
-                    transit_lines = []        # 在途列表（按 eta 排序）
+    try:
+        response = global_session.post(api_url, json=payload, headers=headers, timeout=5)
+        if not (response.status_code == 200 and response.text.strip()):
+            if query_cache is not None:
+                query_cache[cache_key] = (None, [])
+            return None, []
+        page_data = response.json().get("obj", {}).get("page", [])
+    except Exception as e:
+        print(f"[API请求异常] {city_location} {target_type} {target_cond} {color_code}: {e}")
+        if query_cache is not None:
+            query_cache[cache_key] = (None, [])
+        return None, []
 
-                    for item in page_data:
-                        o_price = _num(item, *PRICE_KEYS)
-                        u_price = float(item.get("uPrice") or 0)
-                        onground = int(_num(item, *ONGROUND_KEYS))
-                        upcoming = int(_num(item, *UPCOMING_KEYS))
-                        eta = (item.get("eta") or "").strip()
+    best_ground = None
+    transit_lines = []
 
-                        box_type, box_cond, color_desc = parse_idcode_details(item.get("idCode", ""))
+    for item in page_data:
+        o_price = _num(item, *PRICE_KEYS)
+        u_price = float(item.get("uPrice") or 0)
+        onground = int(_num(item, *ONGROUND_KEYS))
+        upcoming = int(_num(item, *UPCOMING_KEYS))
+        eta = (item.get("eta") or "").strip()
 
-                        # 类型校验（保留原逻辑）
-                        search_kw = current_type.upper().replace("REEFER", "RF").replace("GP", "DC") \
-                            .replace("OPENTOP", "OT").replace("OPENSIDE", "OS").replace("FLATRACK", "FR") \
-                            .replace("HARDTOP", "HT").replace("DOUBLEDOOR", "DD")
-                        bt_up = box_type.upper()
-                        is_valid_type = True
-                        for size in ["10", "20", "40", "45", "53"]:
-                            if size in search_kw and size not in bt_up:
-                                is_valid_type = False
-                        if "HC" in search_kw and "HC" not in bt_up:
-                            is_valid_type = False
-                        for flag in ["RF", "OT", "OS", "DD", "FR", "HT", "PW", "TK"]:
-                            if (flag in search_kw) != (flag in bt_up):
-                                is_valid_type = False
-                        if not is_valid_type:
-                            continue
+        box_type, box_cond, color_desc = parse_idcode_details(item.get("idCode", ""))
 
-                        raw_yom = str(item.get("yom") or "").strip()
-                        yom_val = raw_yom if raw_yom and raw_yom not in ["0", "None", "null"] \
-                            else ("2025-2026" if "NEW" in box_cond.upper() else "2008-2012")
-                        bc = box_cond.upper()
-                        cond_display = "NEW" if is_china and "NEW" in bc and "IICL" not in bc \
-                            else ("New 1-Trip" if "NEW" in bc and "IICL" not in bc
-                                  else ("CW" if bc in ["CW", "CARGOWORTHY"] else box_cond))
+        search_kw = target_type.upper().replace("REEFER", "RF").replace("GP", "DC") \
+            .replace("OPENTOP", "OT").replace("OPENSIDE", "OS").replace("FLATRACK", "FR") \
+            .replace("HARDTOP", "HT").replace("DOUBLEDOOR", "DD")
+        bt_up = box_type.upper()
+        is_valid_type = True
+        for size in ["10", "20", "40", "45", "53"]:
+            if size in search_kw and size not in bt_up:
+                is_valid_type = False
+        if "HC" in search_kw and "HC" not in bt_up:
+            is_valid_type = False
+        for flag in ["RF", "OT", "OS", "DD", "FR", "HT", "PW", "TK"]:
+            if (flag in search_kw) != (flag in bt_up):
+                is_valid_type = False
+        if not is_valid_type:
+            continue
 
-                        common = {"type": box_type, "cond": cond_display, "pol": d_city_val or city_location,
-                                  "color": color_desc, "yom": yom_val}
+        raw_yom = str(item.get("yom") or "").strip()
+        yom_val = raw_yom if raw_yom and raw_yom not in ["0", "None", "null"] \
+            else ("2025-2026" if "NEW" in box_cond.upper() else "2008-2012")
 
-                        # ★ 在场轨：onground>0 AND oPrince>0
-                        if onground > 0 and o_price > 0:
-                            ground_q = {**common,
-                                        "price": f"USD{o_price:.2f}/unit",
-                                        "raw_price": o_price,
-                                        "qty": onground}
-                            if best_ground is None or o_price < best_ground["raw_price"]:
-                                best_ground = ground_q
-                        elif onground > 0 and o_price <= 0:
-                            print(f"[⚠️在场有货无价] {item.get('idCode')} g={onground} oPrince≤0")
+        cond_display = "NEW" if is_china and "NEW" in box_cond.upper() and "IICL" not in box_cond.upper() \
+            else ("New 1-Trip" if "NEW" in box_cond.upper() and "IICL" not in box_cond.upper()
+                  else ("CW" if box_cond.upper() in ["CW", "CARGOWORTHY"] else box_cond))
 
-                        # ★ 在途轨：upcoming>0（uPrice 可能=0 → 待确认，绝不编造）
-                        if upcoming > 0:
-                            if u_price > 0:
-                                transit_lines.append({**common,
-                                                      "price": f"USD{u_price:.2f}/unit",
-                                                      "raw_price": u_price,
-                                                      "qty": upcoming, "eta": eta})
-                            else:
-                                transit_lines.append({**common,
-                                                      "price": "待确认",
-                                                      "raw_price": 0,
-                                                      "qty": upcoming, "eta": eta})
-                                print(f"[⚠️在途有货无价] {item.get('idCode')} u={upcoming} eta={eta} uPrice=0")
+        common = {
+            "type": box_type,
+            "cond": cond_display,
+            "pol": d_city_val or city_location,
+            "color": color_desc,
+            "yom": yom_val
+        }
 
-                    # 在途按 eta 升序
-                    transit_lines.sort(key=lambda x: x.get("eta") or "9999")
+        if onground > 0 and o_price > 0:
+            ground_q = {**common, "price": f"USD{o_price:.2f}/unit", "raw_price": o_price, "qty": onground}
+            if best_ground is None or o_price < best_ground["raw_price"]:
+                best_ground = ground_q
 
-                    if best_ground or transit_lines:
-                        return {"ground_quote": best_ground,
-                                "transit_quotes": transit_lines}
-                except Exception as e:
-                    print(f"[库存 API 异常] 城市 {city_location} 箱型 {current_type}: {e}")
-    return None
+        if upcoming > 0:
+            t_price_str = f"USD{u_price:.2f}/unit" if u_price > 0 else "待确认"
+            transit_lines.append({**common, "price": t_price_str, "raw_price": u_price, "qty": upcoming, "eta": eta})
 
+    result = (best_ground, transit_lines)
+    if query_cache is not None:
+        query_cache[cache_key] = result
+    return result
+
+
+def _find_best_quote_cascading(target_city, single_type, requested_condition, requested_color,
+                               api_url, headers, query_cache=None):
+    """
+    三步级联检索：
+    - Step 1: 严格精确匹配 (Type + Condition + Color)
+    - Step 2: 保持箱型箱况，放宽到其它可用颜色 (Type + Condition + 其它颜色)
+    - Step 3: 推荐相近箱况 (Type + 相近箱况 + 优先原色/通配颜色)
+    """
+    type_variants = expand_special_variants(single_type)
+    color_codes = resolve_color_codes(requested_color)
+
+    req_cond = (requested_condition or "").strip()
+    if not req_cond and any(kw in single_type.upper() for kw in SPECIAL_KEYWORDS):
+        req_cond = "New 1 trip"
+
+    # 🌟 控制台 & 日志输出：特种箱顺推队列展示
+    if len(type_variants) > 1:
+        print(
+            f"🔍 [特种箱探测队列] 提箱城市: {target_city} | 原始要求箱型: '{single_type}' | 候选探测顺序: {' ➔ '.join(type_variants)}")
+
+    # ==========================================================
+    # Step 1: 严格精确匹配 (Strict Match)
+    # ==========================================================
+    if requested_color and not color_codes:
+        step1_colors = []
+    else:
+        step1_colors = color_codes if color_codes else [""]
+
+    for idx, t in enumerate(type_variants):
+        is_variant = (idx > 0) or (t.upper().replace(" ", "") != single_type.upper().replace(" ", ""))
+        for c in step1_colors:
+            g, t_lines = _query_single_stock(target_city, t, req_cond, c, api_url, headers, query_cache=query_cache)
+            if g or t_lines:
+                stock_desc = "现货" if g and not t_lines else ("在途货源" if not g and t_lines else "现货+在途")
+                # 🌟 控制台 & 日志明确输出变体平替
+                if is_variant:
+                    print(
+                        f"🔄 [特种箱平替触发] 提箱地: {target_city} | 客户原需求 '{single_type}' 无货 | 顺推命中相近变体: '{t}' ({stock_desc})")
+                else:
+                    print(f"🎯 [箱型精确匹配] 提箱地: {target_city} | 精确命中客户需求箱型: '{t}' ({stock_desc})")
+
+                return {
+                    "match_type": "ALT_VARIANT" if is_variant else "EXACT",
+                    "orig_type": single_type,
+                    "found_type": t,
+                    "is_variant": is_variant,
+                    "ground_quote": g,
+                    "transit_quotes": t_lines
+                }
+
+    # ==========================================================
+    # Step 2: 保持箱型箱况，放宽到其它可用颜色 (Alternative Colors)
+    # ==========================================================
+    if requested_color:
+        for idx, t in enumerate(type_variants):
+            is_variant = (idx > 0) or (t.upper().replace(" ", "") != single_type.upper().replace(" ", ""))
+            g, t_lines = _query_single_stock(target_city, t, req_cond, "", api_url, headers, query_cache=query_cache)
+            if g or t_lines:
+                stock_desc = "现货" if g and not t_lines else ("在途货源" if not g and t_lines else "现货+在途")
+                found_col = g["color"] if g else (t_lines[0]["color"] if t_lines else "Available Color")
+                if is_variant:
+                    print(
+                        f"🔄 [特种箱+颜色双平替] 提箱地: {target_city} | 原需求: '{single_type}' ({requested_color}) 无货 | 顺推变体: '{t}' 替代颜色: '{found_col}' ({stock_desc})")
+                else:
+                    print(
+                        f"🎨 [颜色平替触发] 提箱地: {target_city} | 箱型: '{t}' | 原颜色 '{requested_color}' 无货 | 替代颜色: '{found_col}' ({stock_desc})")
+
+                return {
+                    "match_type": "ALT_COLOR",
+                    "orig_type": single_type,
+                    "found_type": t,
+                    "is_variant": is_variant,
+                    "orig_color": requested_color,
+                    "found_color": found_col,
+                    "ground_quote": g,
+                    "transit_quotes": t_lines
+                }
+
+    # ==========================================================
+    # Step 3: 推荐相近箱况 (Alternative Conditions)
+    # ==========================================================
+    cond_clean = req_cond.upper().replace(" ", "").replace("-", "")
+    if any(k in cond_clean for k in ["CW", "USED", "WWT", "ASIS", "CARGOWORTHY"]):
+        cand_conditions = ["New 1 trip", "NEW", "IICL"]
+    else:
+        cand_conditions = ["CW", "WWT", "IICL"]
+
+    for alt_cond in cand_conditions:
+        for idx, t in enumerate(type_variants):
+            is_variant = (idx > 0) or (t.upper().replace(" ", "") != single_type.upper().replace(" ", ""))
+            step3_colors = (color_codes + [""]) if color_codes else [""]
+            for c in step3_colors:
+                g, t_lines = _query_single_stock(target_city, t, alt_cond, c, api_url, headers, query_cache=query_cache)
+                if g or t_lines:
+                    stock_desc = "现货" if g and not t_lines else ("在途货源" if not g and t_lines else "现货+在途")
+                    found_c = g["cond"] if g else (t_lines[0]["cond"] if t_lines else alt_cond)
+                    found_col = g["color"] if g else (t_lines[0]["color"] if t_lines else "Mixed")
+                    if is_variant:
+                        print(
+                            f"🔄 [特种箱+箱况双平替] 提箱地: {target_city} | 原需求: '{single_type}' ({req_cond}) 无货 | 顺推变体: '{t}' 替代箱况: '{found_c}' ({stock_desc})")
+                    else:
+                        print(
+                            f"📦 [箱况平替触发] 提箱地: {target_city} | 箱型: '{t}' | 原箱况 '{req_cond}' 无货 | 替代箱况: '{found_c}' ({stock_desc})")
+
+                    return {
+                        "match_type": "ALT_CONDITION",
+                        "orig_type": single_type,
+                        "found_type": t,
+                        "is_variant": is_variant,
+                        "orig_cond": req_cond if req_cond else "Original Condition",
+                        "found_cond": found_c,
+                        "found_color": found_col,
+                        "ground_quote": g,
+                        "transit_quotes": t_lines
+                    }
+
+    print(
+        f"❌ [库存无匹配] 提箱地: {target_city} | 原始要求: '{single_type}' (箱况: '{req_cond}', 颜色: '{requested_color}') 经三步级联查找均无现货与在途。")
+    return {"match_type": "OUT_OF_STOCK", "ground_quote": None, "transit_quotes": []}
 
 
 # ==========================================================
-# 🌟 4. RAG 库存检索层（重构：支持 line_items 分项询盘）
+# 🌟 4. RAG 库存检索层 (在途展示修复 + 特种箱平替标签强化)
 # ==========================================================
 def query_internal_inventory(entities, email_content):
     api_url = os.getenv("INVENTORY_API_URL")
     headers = {"Content-Type": "application/json"}
     line_items = entities.get("line_items") or []
 
-    # ---------- 结构归一：优先 line_items，否则回退旧扁平模式 ----------
+    query_cache = {}
+
     items = []
     if line_items:
         for li in line_items:
@@ -527,7 +648,7 @@ def query_internal_inventory(entities, email_content):
                               "cond": (li.get("condition") or "").strip(),
                               "color": (li.get("color") or "").strip(),
                               "loc": (li.get("location") or "").strip(),
-                              "qty": max(q, 0)})  # ★ AI提取的该行需求量，0=未明确
+                              "qty": max(q, 0)})
     else:
         raw_types = [t.strip() for t in str(entities.get("container_type") or "")
         .replace('，', ',').split(',') if t.strip()]
@@ -548,16 +669,14 @@ def query_internal_inventory(entities, email_content):
             items.append({"type": t, "cond": cond, "color": raw_col,
                           "loc": raw_loc, "qty": max(flat_qty, 0)})
 
-    # ---------- 分项检索 ----------
     rows, nostock, need_ask = [], [], []
     for it in items:
         ctype, cond, colname, locdesc = it["type"], it["cond"], it["color"], it["loc"]
-        label_bits = [b for b in [ctype or None, colname or None] if b]
-        tag = "/".join(label_bits) or ctype or "?"
+        m_req = it.get("qty") or 0
+        tag = f"{ctype} {cond} {colname}".strip()
 
         if not ctype:
-            ctx = f"{colname}色，{locdesc or '地点未知'}" if colname else (locdesc or '地点未知')
-            need_ask.append(f"缺少箱型（{ctx}）")
+            need_ask.append("缺少箱型")
             continue
         if not locdesc:
             need_ask.append(f"{ctype} 的提箱地点 (Target Location)")
@@ -566,53 +685,70 @@ def query_internal_inventory(entities, email_content):
         cities, relation = parse_locations_and_relation(locdesc)
         avail, unavail = [], []
         for city in cities:
-            q = _find_best_quote_for_item(city, ctype, cond, resolve_color_codes(colname), api_url, headers)
-            if q:
-                avail.append((city, q))
+            res = _find_best_quote_cascading(city, ctype, cond, colname, api_url, headers, query_cache=query_cache)
+            if res.get("ground_quote") or res.get("transit_quotes"):
+                avail.append((city, res))
             else:
                 unavail.append(city)
-        for it in items:
-            ctype, cond, colname, locdesc = it["type"], it["cond"], it["color"], it["loc"]
-            m_req = it.get("qty") or 0  # ★ AI从原文提取的需求量，防不住的写法交给AI
 
-        for _, result in avail:
-            g = result.get("ground_quote")
-            t_list = result.get("transit_quotes") or []
+        for _, res in avail:
+            g = res.get("ground_quote")
+            t_list = res.get("transit_quotes") or []
+            m_type = res.get("match_type")
 
-            # ★ 在途颜色过滤（只保留匹配客户请求颜色的）
+            # 在途颜色过滤
             req_color_code = ""
-            for li in (line_items or []):
-                if isinstance(li, dict) and li.get("color"):
-                    m_c = re.search(r'\d{4}', li["color"])
-                    if m_c:
-                        req_color_code = m_c.group()
-                        break
+            if colname:
+                m_c = re.search(r'\d{4}', colname)
+                if m_c:
+                    req_color_code = m_c.group()
             if req_color_code:
                 t_list = [t for t in t_list if req_color_code in t.get("color", "")]
 
-            # ★ 场货够用判断
             ground_qty = g["qty"] if g else 0
-            show_transit = ground_qty < m_req if m_req > 0 else False
+            show_transit = (ground_qty == 0) or (m_req > 0 and ground_qty < m_req)
+            qty_display = str(ground_qty) if (m_req > 0 and ground_qty >= m_req) else "Available"
 
             if g:
-                # ★ Q'ty 在底牌里就钉死，不让 Drafter 自由发挥
-                if m_req > 0 and ground_qty >= m_req:
-                    qty_display = str(ground_qty)  # 客户明确要N只且够→写实际数量
-                else:
-                    qty_display = "Available"  # 客户没明确数量→不暴露精确库存
-                rows.append(f"- Style: {g['type']} | Condition: {g['cond']} | POL: {g['pol']} | "
-                            f"Color: {g['color']} | YOM: {g['yom']} | Price: {g['price']} | "
-                            f"Stock_Qty: {qty_display} | Payment: 100% TT before pick up.")
+                if m_type == "EXACT":
+                    rows.append(f"- [EXACT] Style: {g['type']} | Condition: {g['cond']} | POL: {g['pol']} | "
+                                f"Color: {g['color']} | YOM: {g['yom']} | Price: {g['price']} | "
+                                f"Stock_Qty: {qty_display} | Payment: 100% TT before pick up.")
+                elif m_type == "ALT_VARIANT":
+                    rows.append(
+                        f"- [ALT_VARIANT] (说明：客户指定的特种规格 '{res['orig_type']}' 在 {g['pol']} 严格筛选无货，顺推推荐相近规格 '{res['found_type']}') "
+                        f"Style: {g['type']} | Condition: {g['cond']} | POL: {g['pol']} | "
+                        f"Color: {g['color']} | YOM: {g['yom']} | Price: {g['price']} | "
+                        f"Stock_Qty: {qty_display} | Payment: 100% TT before pick up.")
+                elif m_type == "ALT_COLOR":
+                    prefix = f"(说明：特种规格原要 '{res['orig_type']}' 顺推推荐 '{res['found_type']}，且" if res.get(
+                        "is_variant") else "(说明："
+                    rows.append(
+                        f"- [ALT_COLOR] {prefix}客户指定的颜色 '{res['orig_color']}' 在 {g['pol']} 严格筛选无现货，推荐其它可用颜色 '{res['found_color']}') "
+                        f"Style: {g['type']} | Condition: {g['cond']} | POL: {g['pol']} | "
+                        f"Color: {g['color']} | YOM: {g['yom']} | Price: {g['price']} | "
+                        f"Stock_Qty: {qty_display} | Payment: 100% TT before pick up.")
+                elif m_type == "ALT_CONDITION":
+                    prefix = f"(说明：特种规格原要 '{res['orig_type']}' 顺推推荐 '{res['found_type']}，且" if res.get(
+                        "is_variant") else "(说明："
+                    rows.append(
+                        f"- [ALT_CONDITION] {prefix}客户指定的箱况 '{res['orig_cond']}' 在 {g['pol']} 严格筛选无现货，推荐替代箱况 '{res['found_cond']}') "
+                        f"Style: {g['type']} | Condition: {g['cond']} | POL: {g['pol']} | "
+                        f"Color: {g['color']} | YOM: {g['yom']} | Price: {g['price']} | "
+                        f"Stock_Qty: {qty_display} | Payment: 100% TT before pick up.")
 
-            # ★ 只有场货不够时才展示在途，独立成段
             if show_transit and t_list:
-                rows.append("===【在途补充】===")
+                # 🌟 在途标题区显式打印顺推信息
+                if res.get("is_variant"):
+                    rows.append(
+                        f"===【在途补充 - 特种箱平替推荐 (客户原需求 '{res['orig_type']}' 暂无货，顺推相近规格 '{res['found_type']}')】===")
+                else:
+                    rows.append("===【在途补充】===")
                 for t in t_list:
                     rows.append(f"- [TRANSIT] Style: {t['type']} | Condition: {t['cond']} | "
                                 f"POL: {t['pol']} | Color: {t['color']} | YOM: {t['yom']} | "
                                 f"ETA: {t['eta']} | Q'ty: {t['qty']} units | Price: {t['price']}")
 
-        # OR逻辑：已有备选城市有货时静默跳过无货城市；其余情况如实质歉
         if unavail and (relation != "OR" or not avail):
             nostock.append(f"[NOSTOCK] {'/'.join(unavail)} | {tag}")
 
@@ -647,7 +783,6 @@ def predict_intent(e_title, e_content):
     abbr_list_str = ", ".join([f"{k}({v})" for k, v in CITY_ABBR_MAPPING.items()])
     schema_str = json.dumps(cfg.get("router_output_schema", {}), ensure_ascii=False, separators=(',', ':'))
     router_template = load_skill_file("00_router_engine.md")
-    # 🌟 改用字符串替换而非 format()，模板中的 JSON 示例花括号不再引发 KeyError
     router_prompt = (router_template
                      .replace("{{abbr_list}}", abbr_list_str)
                      .replace("{{entity_rules}}", load_entity_rules())
@@ -675,26 +810,32 @@ def predict_intent(e_title, e_content):
 
 
 # ==========================================================
-# 🌟 6. Stage 3: AI邮件生成 (Drafter) —— 重试 + 场景感知兜底
+# 🌟 6. Stage 3: AI邮件生成 (Drafter)
 # ==========================================================
 def _extract_rag_rows(inventory_data):
     pat = re.compile(
-        r"- Style:\s*(.*?)\s*\|\s*Condition:\s*(.*?)\s*\|\s*POL:\s*(.*?)\s*\|\s*Color:\s*(.*?)\s*\|"
+        r"-\s*(?:\[[A-Z_]+\][^\n|]*?)?\s*Style:\s*(.*?)\s*\|\s*Condition:\s*(.*?)\s*\|\s*POL:\s*(.*?)\s*\|\s*Color:\s*(.*?)\s*\|"
         r"\s*YOM:\s*(.*?)\s*\|\s*Price:\s*(.*?)\s*\|\s*Stock_Qty:\s*(\d+|Available)\s*\|\s*Payment:\s*([^\n|]*)")
     return [tuple(g.strip() for g in m.groups()) for m in pat.finditer(inventory_data)]
 
 
-
 def _safe_fallback_draft(e_content, inventory_data):
-    """确定性兜底：根据场景直接模板化输出，保证必过 Reviewer"""
+    """确定性中英双语兜底：避免中文邮件触发 Reviewer 语言不一致拦截"""
+    is_chinese = any('\u4e00' <= char <= '\u9fff' for char in e_content)
+
     if rag_missing_info(inventory_data):
+        if is_chinese:
+            return ("感谢您的询盘。为了能给您提供准确的报价，请问能否请您补充以下细节？\n\n"
+                    "- 所需箱型（如 20DC, 40HC）\n"
+                    "- 箱况要求（新箱 / 适货旧箱 CW）\n"
+                    "- 提箱地点\n\n"
+                    "收到您的具体信息后，我们将在第一时间为您提供最优报价。")
         return ("Thank you for your inquiry. To prepare an accurate quotation, could you please kindly "
                 "confirm the following details?\n\n- Container type (e.g., 20DC, 40HC)\n"
                 "- Condition (New / Used CW)\n- Pickup location\n\n"
                 "Once received, we will revert with our best offer immediately.")
 
     rows = _extract_rag_rows(inventory_data)
-
     blocks = []
     for style, cond, pol, color, yom, price, qty, pay in rows:
         qt = f"{qty} units" if qty.isdigit() else "Available"
@@ -703,25 +844,59 @@ def _safe_fallback_draft(e_content, inventory_data):
 
     if not blocks:
         has_ns = "[NOSTOCK]" in inventory_data
+        if is_chinese:
+            return ("感谢您的询盘。十分抱歉，目前在您所要求的地区暂无完全匹配上述规格的现货库存。"
+                    + (
+                        " 我们正在与堆场进一步核实最新到港情况，稍后有更新会第一时间答复您。" if has_ns else " 请问您是否有其它规格或地点可以考虑？"))
         return ("Thank you for your inquiry. We sincerely apologize that we currently do not have "
                 "matching stock for the specifications you requested."
                 + (" We are verifying availability with our depots and will revert as soon as possible."
                    if has_ns else " Could you kindly share more details so we can check further?"))
 
-    body = "Thank you for your inquiry. Please find our best offer below:\n\n" + "\n\n".join(blocks)
+    if is_chinese:
+        if "[ALT_VARIANT]" in inventory_data:
+            body = "感谢您的询盘。严格按照您的要求，目前暂无您指定门扇/特种规格的现货。作为替代参考方案，我们为您推荐如下相近规格现货：\n\n"
+        elif "[ALT_COLOR]" in inventory_data:
+            body = "感谢您的询盘。严格按照您的要求，目前暂无您指定颜色的现货。如果您考虑其它颜色，我们为您推荐如下可用现货：\n\n"
+        elif "[ALT_CONDITION]" in inventory_data:
+            body = "感谢您的询盘。严格按照您的要求，目前暂无您指定箱况的现货。作为替代参考方案，我们为您推荐如下可用现货：\n\n"
+        else:
+            body = "感谢您的询盘，请查阅我们的最优报价：\n\n"
+    else:
+        if "[ALT_VARIANT]" in inventory_data:
+            body = ("Thank you for your inquiry. Please note that containers strictly matching your requested "
+                    "special door/variant specification are currently unavailable. However, as an alternative option, "
+                    "we are pleased to recommend the following available option:\n\n")
+        elif "[ALT_COLOR]" in inventory_data:
+            body = ("Thank you for your inquiry. Please note that containers strictly matching your requested "
+                    "color are currently unavailable. However, if you would consider an alternative color, "
+                    "we are pleased to recommend the following available option:\n\n")
+        elif "[ALT_CONDITION]" in inventory_data:
+            body = ("Thank you for your inquiry. Please note that containers strictly matching your requested "
+                    "condition are currently unavailable. However, as an alternative option, we are pleased to "
+                    "recommend the following available containers:\n\n")
+        else:
+            body = "Thank you for your inquiry. Please find our best offer below:\n\n"
+
+    body += "\n\n".join(blocks)
 
     asks = re.findall(r'^\[ASK\]\s*(.+)$', inventory_data, re.M)
     if asks:
-        body += "\n\nAdditionally, could you please kindly confirm: " + "; ".join(asks) + "?"
+        ask_text = "；".join(asks) if is_chinese else "; ".join(asks)
+        body += f"\n\n{'另外，能否请您协助确认：' if is_chinese else 'Additionally, could you please kindly confirm: '}{ask_text}?"
+
     nostock_lines = re.findall(r'^\[NOSTOCK\]\s*(.+)$', inventory_data, re.M)
     if nostock_lines:
         cleaned = [ln.replace('|', ' - ').strip() for ln in nostock_lines]
-        body += ("\n\nRegarding the following specifications ("
-                 + "; ".join(cleaned) + "), we do not have matching stock at the "
-                                        "moment. We are verifying availability with our depots and will "
-                                        "update you as soon as possible.")
+        if is_chinese:
+            body += f"\n\n关于以下规格（{'；'.join(cleaned)}），目前暂无现货，我们正在与堆场核实并会及时更新。"
+        else:
+            body += ("\n\nRegarding the following specifications ("
+                     + "; ".join(cleaned) + "), we do not have matching stock at the "
+                                            "moment. We are verifying availability with our depots and will "
+                                            "update you as soon as possible.")
 
-    body += "\n\nPlease let us know if you would like to proceed."
+    body += "\n\n如需推进订单或有任何疑问，请随时联系我们。" if is_chinese else "\n\nPlease let us know if you would like to proceed."
     return body
 
 
@@ -732,7 +907,6 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data,
 
     sales_sop = load_skill_file("01_sales_inquiry.md")
 
-    # ---------- 🌟 场景选择（基于统一助手函数） ----------
     if rag_missing_info(inventory_data):
         scenario_rules = """[SCENARIO: MISSING INFORMATION]
 1. Output ONLY a polite request asking the customer to clarify the missing details listed in the stock data.
@@ -745,15 +919,31 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data,
    Closing line: "Please let us know if you need any other assistance."
 3. ZERO TOLERANCE: NO quote blocks, NO Price, NO Q'ty, NO "Please find our best offer below", NO Subject, NO Dear, NO Signatures."""
     else:
-        scenario_rules = """[SCENARIO: QUOTATION]
-1. Opening line MUST be: "Thank you for your inquiry. Please find our best offer below:"
-2. For EACH price row in VERIFIED STOCK DATA output one quote block (Style/Condition/POL/Color/YOM/Price/Q'ty/Payment).
-   Q'ty: specific number if Stock_Qty >= customer's requested quantity, otherwise "Available".
-   Payment line copied EXACTLY: "Payment: 100% TT before pick up."
-3. Partial stock: if [NOSTOCK] items exist alongside quotes, ONLY the quoted items appear above, then append ONE short paragraph apologizing for the [NOSTOCK] specifications and saying we are verifying with our depots.
-4. Obey every 调度指令/[ASK] directive strictly.
-5. Closing line MUST be: "Please let us know if you would like to proceed."
-6. ZERO TOLERANCE: NO bold city headers, NO Subject, NO Dear, NO Signatures, NEVER invent prices."""
+        scenario_rules = """[SCENARIO: QUOTATION & RECOMMENDATION]
+    1. Opening line & Explanatory Wording (STRICT COMPLIANCE):
+       - If all items are [EXACT]:
+         Opening MUST be: "Thank you for your inquiry. Please find our best offer below:" (中文: "感谢您的询盘，请查阅我们的最优报价：")
+       - If an item is tagged [ALT_VARIANT] or mentions special variant fallback (e.g. 2-door out of stock, offering 4-door):
+         You MUST explicitly state that strictly per customer's requirements the requested door/variant specification is unavailable, then introduce the recommended specification as an alternative:
+         "Thank you for your inquiry. Please note that containers strictly matching your requested specification are currently unavailable. However, as an alternative option, we are pleased to recommend the following available option:"
+         (中文询盘: "感谢您的询盘。严格按照您的要求，目前暂无您指定门扇/特种规格的现货。作为替代参考方案，我们为您推荐如下相近规格现货：")
+       - If an item is tagged [ALT_COLOR] (requested color out of stock):
+         You MUST explicitly state that strictly per customer's requirements the requested color is unavailable, then introduce the recommended color:
+         "Thank you for your inquiry. Please note that containers strictly matching your requested color are currently unavailable. However, if you would consider an alternative color, we are pleased to recommend the following available option:"
+         (中文询盘: "感谢您的询盘。严格按照您的要求，目前暂无您指定的颜色现货。如果您考虑其它颜色，我们为您推荐如下可用现货：")
+       - If an item is tagged [ALT_CONDITION] (requested condition out of stock):
+         You MUST explicitly state that strictly per customer's requirements the requested condition is unavailable, then introduce the recommended condition:
+         "Thank you for your inquiry. Please note that containers in your requested condition are currently unavailable. However, as an alternative option, we are pleased to recommend the following available containers:"
+         (中文询盘: "感谢您的询盘。严格按照您的要求，目前暂无您指定箱况的现货。如果您考虑其它箱况作为替代，我们为您推荐如下现货：")
+    2. Quote Block Rules (NO DUPLICATES):
+       - For each UNIQUE container specification (Style + POL + Condition + Color), output EXACTLY ONE standard quote block.
+       - NEVER output duplicate quote blocks for the same container specification. If there are multiple transit batches with different ETAs/quantities for the same container, display ONE quote block and explain the arrival batches in the narrative below.
+       - Payment line copied EXACTLY: "Payment: 100% TT before pick up."
+    3. Collateral requests handling (CRITICAL):
+       - If customer asks for sales contacts, purchase agreement/proforma, or specific depot location: state in ONE sentence that our sales team will provide the proforma invoice/agreement and specific release details immediately upon your confirmation of the offer.
+       - If customer asks for lease/rental rate: politely clarify that we specialize in direct container sales rather than short-term lease.
+    4. Closing line MUST be: "Please let us know if you would like to proceed." (中文: "如需推进订单或有任何疑问，请随时联系我们。")
+    5. ZERO TOLERANCE: NO bold city headers, NO Subject, NO Dear, NO Signatures, NEVER invent depot names, NEVER invent phone numbers/person names."""
 
     system_prompt = f"""You are a professional sales representative at Hysun Container. Strictly follow the Sales SOP, the verified stock data and the scenario rules. NEVER return an empty answer; if unsure, quote the stock data verbatim.
 
@@ -776,19 +966,19 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data,
                        f"Rewrite the full email fixing ONLY the reported problem, keeping all other "
                        f"required clauses. Do NOT return an empty message.")
 
-    temperature = 0.0 if rejection_reason else 0.05
+    temperature = 0.0 if rejection_reason else 0.1
     last_err = ""
-    for attempt in range(3):  # 🌟 空/异常响应自动重试
+    for attempt in range(3):
         try:
             response = ai_client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[{"role": "system", "content": system_prompt},
                           {"role": "user", "content": user_prompt}],
-                temperature=temperature, max_tokens=1500
+                temperature=temperature, max_tokens=5000
             )
             raw_out = (response.choices[0].message.content or "").strip()
             draft = clean_draft_text(raw_out)
-            if draft and len(draft) >= 15:   # 🌟 清洗后过短=疑似被误伤，视为失败走重试/兜底
+            if draft and len(draft) >= 15:
                 return draft
             last_err = f"第{attempt + 1}次生成异常(原始{len(raw_out)}字符→清洗后{len(draft)}字符)"
         except Exception as e:
@@ -801,18 +991,18 @@ def generate_draft_reply(e_title, e_content, router_result, inventory_data,
 
 
 # ==========================================================
-# 🌟 7. Stage 4: Reviewer —— 增加场景一致性硬校验
+# 🌟 7. Stage 4: Reviewer
 # ==========================================================
 def review_ai_reply(original_title, original_content, draft_reply, router_result, inventory_data):
     if draft_reply == "NO_REPLY":
         return (True, "") if router_result.get("action") == "NO_REPLY" \
             else (False, "Router said REPLY but got NO_REPLY")
 
-    # ---------- 1. Python 代码级硬校验 ----------
+    # 1. Python 代码级硬校验
     if rag_has_quotes(inventory_data):
-        if not re.search(r'Payment\s*:.*?100%\s*T/?T', draft_reply, re.IGNORECASE):
+        if not re.search(r'(?:Payment|付款方式)\s*:.*?100%\s*T/?T', draft_reply, re.IGNORECASE):
             return False, "Missing mandatory clause: 'Payment: 100% TT before pick up.'"
-        if not re.search(r"Q['’]?ty\s*:\s*(\d+|Available)", draft_reply, re.IGNORECASE):
+        if not re.search(r"(?:Q['’]?ty|数量)\s*:\s*(\d+|Available|现货)", draft_reply, re.IGNORECASE):
             return False, "Missing mandatory clause: 'Q\\'ty' must be a specific number or 'Available'."
 
     if "Cargo Worthy" in draft_reply:
@@ -824,19 +1014,20 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
     if "|" in draft_reply:
         return False, "Draft contains forbidden Markdown table syntax (|)."
 
-    # ---------- 2. 🌟 场景一致性校验 ----------
+    # 2. 场景一致性校验
     lower_draft = draft_reply.lower()
     if rag_all_nostock(inventory_data):
         if re.search(r"style\s*:|q['’]?ty\s*:|payment\s*:", draft_reply, re.IGNORECASE):
             return False, "Out-of-stock scenario but draft contains quote clauses (hallucinated offer)."
-        if "please find our best offer below" in lower_draft:
-            return False, "Contradictory opening 'Please find our best offer below' in out-of-stock reply."
+        if "please find our best offer below" in lower_draft or "请查阅我们的最优报价" in draft_reply:
+            return False, "Contradictory quotation opening in out-of-stock reply."
     elif rag_has_quotes(inventory_data):
-        if "please find our best offer below" in lower_draft \
+        if (
+                "please find our best offer below" in lower_draft or "recommend" in lower_draft or "请查阅" in draft_reply or "推荐" in draft_reply) \
                 and not re.search(r"style\s*:", draft_reply, re.I):
-            return False, "'Please find our best offer below' present but no Style quote block found."
+            return False, "Quotation/recommendation opening present but no Style quote block found."
 
-    # ---------- 3. LLM 审核员 ----------
+    # 3. LLM 审核员
     sales_sop = load_skill_file("01_sales_inquiry.md")
     reviewer_template = load_skill_file("02_response_guard.md")
     review_prompt = reviewer_template.format(sales_sop=sales_sop, inventory_data=inventory_data)
@@ -860,21 +1051,24 @@ def review_ai_reply(original_title, original_content, draft_reply, router_result
 # ==========================================================
 # 8. 统一入口与执行调度
 # ==========================================================
-# ==========================================================
-# 🌟 业务范围控制：放行 散单询盘 + 大宗合作/总清单询盘
 ALLOWED_REPLIER_INTENTS = {"STOCK_PRICE_INQUIRY", "STRATEGIC_BULK_INQUIRY"}
+
+
 def _build_noreply_reason(e_title, e_content, router_result):
-    """让 LLM 根据邮件内容生成一句中文原因，说明为何无需回复（写入数据库供人工排查）"""
     p_intent = router_result.get("primary_intent", "UNKNOWN")
     s_intents = router_result.get("secondary_intents", []) or []
+
+    if p_intent in ("DEDICATED_CONTACT_REQUEST", "STRATEGIC_BULK_INQUIRY"):
+        return "客户索要专属对接人或大宗/定制合作，需人工业务经理线下介入。"
+
     try:
         response = ai_client.chat.completions.create(
             model=AI_MODEL,
             messages=[
                 {"role": "system", "content":
-                    "你是邮件分类助手。系统已判定以下邮件无需回复。"
-                    "请根据邮件内容用一句简洁的中文（15~40字）说明不回复的具体原因，"
-                    "点明邮件性质（如：供应商主动推销、营销广告、通知函等）。"
+                    "你是邮件分类助手。系统已判定以下邮件无需自动回复。"
+                    "请根据邮件内容用一句简洁的中文（15~40字）说明不自动回复的具体原因。"
+                    "若为垃圾营销/系统通知注明其性质；若为重要大宗/特殊需求注明需人工跟进。"
                     "只输出原因本身，禁止输出任何前缀、引号或多余标点。"},
                 {"role": "user", "content":
                     f"邮件标题：{e_title}\n\n邮件正文：{e_content}\n\n"
@@ -890,83 +1084,26 @@ def _build_noreply_reason(e_title, e_content, router_result):
             return reason
     except Exception as e:
         print(f"⚠️ [NO_REPLY原因生成异常] {e}")
-    return f"系统判定为{p_intent}，非客户询盘，无需回复。"
+    return f"系统判定为{p_intent}，转人工或无需自动回复。"
 
-
-def generate_ai_reply(e_title, e_content, flag):
-    print("📥 [DEBUG 接收到的原始邮件]")
-    print(f"【标题】: {e_title}\n【正文】:\n{e_content}\n" + "=" * 50 + "\n")
-
-    print("Stage 1: Intent Router...")
-    router_result = predict_intent(e_title, e_content)
-    print("Router Result:", json.dumps(router_result, ensure_ascii=False))
-
-    p_intent = str(router_result.get("primary_intent") or "UNKNOWN").strip()
-
-    if router_result.get("action") == "NO_REPLY":
-        specific_reason = _build_noreply_reason(e_title, e_content, router_result)
-        print(f"\n🚫 [提前拦截] {specific_reason}")
-        return f"NO_REPLY_REASON::{specific_reason}"
-
-    # 1. 白名单拦截
-    if p_intent not in ALLOWED_REPLIER_INTENTS:
-        specific_reason = _build_noreply_reason(e_title, e_content, router_result)
-        print(f"\n🚫 [范围外拦截] {specific_reason}")
-        return f"NO_REPLY_REASON::{specific_reason}"
-
-    # 🌟 2. 新增：大宗/货代总清单询盘直接转交业务经理（跳过 ERP RAG 查库与散单报价模板）
-    if p_intent == "STRATEGIC_BULK_INQUIRY":
-        print("\n🤝 [大宗/长线合作询盘] 匹配战略合作意图，生成业务经理对接草稿...")
-        handover_draft = generate_manager_handover_draft(e_title, e_content, router_result)
-        print("\n====== 最终经理转交邮件 ======\n" + handover_draft + "\n==========================\n")
-        return handover_draft
-
-    # 3. 原有散单现货库存检索链路 (STOCK_PRICE_INQUIRY)
-    inventory_data = query_internal_inventory(router_result.get("entities", {}),
-                                              f"{e_title}\n{e_content}")
-    if flag == 3 and rag_all_nostock(inventory_data):
-        print(f"\n🚫 [群发静默] 群发邮件(flag=3)且无可用库存，系统自动放弃回复。")
-        return f"NO_REPLY_REASON::群发邮件无现货"
-
-    print("\n🤖 [DEBUG 查到的库存底牌]：\n" + inventory_data)
-
-    print("Stage 2/3: Generate Draft...")
-    draft = generate_draft_reply(e_title, e_content, router_result, inventory_data)
-
-    for attempt in range(2):
-        print(f"Stage 4: Reviewing (Attempt {attempt + 1})...")
-        passed, feedback = review_ai_reply(e_title, e_content, draft, router_result, inventory_data)
-        if passed:
-            print("\n====== 最终邮件 (PASS) ======\n" + draft + "\n======================\n")
-            return draft
-        else:
-            print(f"❌ [Reviewer 打回] 原因: {feedback}")
-            print(f"--- 🚫 遭拒草稿内容 ---\n{draft}\n-------------------------------")
-            draft = generate_draft_reply(e_title, e_content, router_result, inventory_data,
-                                         previous_draft=draft, rejection_reason=feedback)
-
-    print(f"\n💥 [致命警告] 审核重试耗尽，该邮件被硬性阻断，绝不发送给客户！")
-    return f"REVIEW_FAILED::{feedback}"
 
 def generate_manager_handover_draft(e_title, e_content, router_result=None):
     """
-    大宗合作/清单询盘转交回复：
-    极简两段式标准排版（3-4句话），严禁复读客户背景，严禁擅自承诺。
+    大宗合作/需人工评估询盘的标准收件回执
     """
     system_prompt = """You are a professional email assistant at Hysun Container.
 Write a concise, polite, and well-formatted business acknowledgment email.
 
-【Core Content (2 Short Paragraphs Only)】
-- Paragraph 1: Thank the customer and confirm that we have received their inquiry.
-- Paragraph 2: State that you have forwarded their request and contact details to our Sales Manager, and the manager will reach out to them shortly.
+【Core Content (1 Short Paragraph Only)】
+Thank the customer for their email and inquiry, and state that we will review their requirements and respond at our earliest convenience.
 
 【Strict Prohibitions - ZERO TOLERANCE】
-1. NO PARROTING: Absolutely DO NOT echo customer details (such as specific TEU quantities, company names, business models, or corridors).
-2. NO COMMERCIAL PROMISES: Do NOT claim we are "keen to partner" or promise specific supply arrangements. Keep it strictly as an administrative acknowledgment.
-3. CONCISE: Keep the entire email under 50 words (maximum 3 to 4 sentences).
+1. NO PARROTING: Absolutely DO NOT echo customer details (such as TEU quantities, company names, business models, or corridors).
+2. NO COMMERCIAL PROMISES: Do NOT claim we can supply, do NOT promise prices or lead times. Keep it strictly as an administrative receipt.
+3. CONCISE: Keep the entire text to 1-2 concise sentences (under 35 words).
 
 【Formatting & Language】
-1. Use a double line break (\\n\\n) between the two paragraphs.
+1. Output 1 single, clean paragraph.
 2. Output the bare email body ONLY (NO Subject, NO "Dear...", NO sign-offs/signatures).
 3. Strictly mirror the customer's email language."""
 
@@ -980,35 +1117,102 @@ Write a concise, polite, and well-formatted business acknowledgment email.
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.0,  # 归零发散度，防止自由发挥
-                max_tokens=200
+                temperature=0.0,
+                max_tokens=150
             )
             raw_out = (response.choices[0].message.content or "").strip()
             draft = clean_draft_text(raw_out)
             if draft and len(draft) >= 10:
                 return draft
         except Exception as e:
-            print(f"⚠️ [Handover Draft 生成异常 第{attempt+1}次] {e}")
+            print(f"⚠️ [Handover Draft 生成异常 第{attempt + 1}次] {e}")
             time.sleep(1)
 
-    # 兜底保持一致的两段式排版
     is_chinese = any('\u4e00' <= char <= '\u9fff' for char in e_content)
     if is_chinese:
-        return ("感谢您联系 Hysun，我们已收到您的询价与业务需求。\n\n"
-                "我已将您的邮件和联系方式转交给业务经理，经理会尽快与您取得联系。")
-    return ("Thank you for reaching out to Hysun Container. We have well received your inquiry.\n\n"
-            "I have forwarded your request and contact details to our Sales Manager, who will get in touch with you shortly.")
+        return "感谢您的来信与询盘。我们正在评估您的具体需求，并将尽快与您取得联系并予以答复。"
+    return "Thank you for your email and inquiry. We will review your requirements and respond to you at our earliest convenience."
+
+
+def generate_ai_reply(e_title, e_content, flag):
+    print("📥 [DEBUG 接收到的原始邮件]")
+    print(f"【标题】: {e_title}\n【正文】:\n{e_content}\n" + "=" * 50 + "\n")
+
+    print("Stage 1: Intent Router...")
+    router_result = predict_intent(e_title, e_content)
+    print("Router Result:", json.dumps(router_result, ensure_ascii=False))
+
+    p_intent = str(router_result.get("primary_intent") or "UNKNOWN").strip()
+
+    # 1. 战略大宗合作优先走人工转交回复（不被 NO_REPLY 拦截）
+    if p_intent == "STRATEGIC_BULK_INQUIRY":
+        print("\n🤝 [大宗/长线合作询盘] 匹配战略合作意图，生成业务经理对接草稿...")
+        handover_draft = generate_manager_handover_draft(e_title, e_content, router_result)
+        print("\n====== 最终经理转交邮件 ======\n" + handover_draft + "\n==========================\n")
+        return handover_draft
+
+    # 2. 拦截检查
+    if router_result.get("action") == "NO_REPLY":
+        specific_reason = _build_noreply_reason(e_title, e_content, router_result)
+        print(f"\n🚫 [提前拦截] {specific_reason}")
+        return f"NO_REPLY_REASON::{specific_reason}"
+
+    if p_intent not in ALLOWED_REPLIER_INTENTS:
+        specific_reason = _build_noreply_reason(e_title, e_content, router_result)
+        print(f"\n🚫 [范围外拦截] {specific_reason}")
+        return f"NO_REPLY_REASON::{specific_reason}"
+
+    # 3. 散单现货库存级联检索 (STOCK_PRICE_INQUIRY)
+    inventory_data = query_internal_inventory(router_result.get("entities", {}), f"{e_title}\n{e_content}")
+    if flag == 3 and rag_all_nostock(inventory_data):
+        print(f"\n🚫 [群发静默] 群发邮件(flag=3)且无可用库存，系统自动放弃回复。")
+        return "NO_REPLY_REASON::群发邮件无现货"
+
+    print("\n🤖 [DEBUG 查到的库存底牌]：\n" + inventory_data)
+
+    print("Stage 2/3: Generate Draft...")
+    draft = generate_draft_reply(e_title, e_content, router_result, inventory_data)
+
+    feedback = ""
+    for attempt in range(2):
+        print(f"Stage 4: Reviewing (Attempt {attempt + 1})...")
+        passed, feedback = review_ai_reply(e_title, e_content, draft, router_result, inventory_data)
+        if passed:
+            print("\n====== 最终邮件 (PASS) ======\n" + draft + "\n======================\n")
+            return draft
+        else:
+            print(f"❌ [Reviewer 打回] 原因: {feedback}")
+            print(f"--- 🚫 遭拒草稿内容 ---\n{draft}\n-------------------------------")
+            draft = generate_draft_reply(e_title, e_content, router_result, inventory_data,
+                                         previous_draft=draft, rejection_reason=feedback)
+
+    print(f"⚠️ [Drafter] 审核未通过，切换安全确定性兜底模板...")
+    safe_draft = _safe_fallback_draft(e_content, inventory_data)
+    passed, _ = review_ai_reply(e_title, e_content, safe_draft, router_result, inventory_data)
+    if passed:
+        return safe_draft
+
+    print(f"\n💥 [致命警告] 兜底质检亦未通过，硬性阻断！")
+    return f"REVIEW_FAILED::{feedback}"
 
 
 def process_pending_emails():
     conn = None
+    e_id = None
     try:
         conn = pymysql.connect(**DB_CONFIG)
         with conn.cursor(pymysql.cursors.DictCursor) as cursor:
             cursor.execute(
+                f"UPDATE {TABLE_NAME} SET ai_status = 0 "
+                f"WHERE ai_status = 1 AND uptime < DATE_SUB(NOW(), INTERVAL 30 MINUTE);"
+            )
+            conn.commit()
+
+            cursor.execute(
                 f"SELECT e_id, e_title, e_content, flag FROM {TABLE_NAME} "
                 f"WHERE ai_status = 0 AND flag IN (2, 3) AND fb_mail IS NULL "
-                f"AND DATE(uptime) = CURDATE() ORDER BY uptime DESC LIMIT 1 FOR UPDATE;")
+                f"AND DATE(uptime) = CURDATE() ORDER BY uptime DESC LIMIT 1 FOR UPDATE;"
+            )
             email = cursor.fetchone()
             if not email:
                 return False
@@ -1038,9 +1242,17 @@ def process_pending_emails():
             conn.commit()
             return True
     except Exception as e:
-        print(f"💥 [生产处理错误] {e}")
-        if conn:
-            conn.rollback()
+        print(f"💥 [生产处理错误] 邮件ID: {e_id}, 错误: {e}")
+        if conn and e_id:
+            try:
+                with conn.cursor() as err_cursor:
+                    err_cursor.execute(
+                        f"UPDATE {TABLE_NAME} SET ai_reply=%s, ai_status=3, uptime=NOW() WHERE e_id=%s",
+                        (f"系统运行异常: {str(e)[:200]}", e_id)
+                    )
+                conn.commit()
+            except:
+                conn.rollback()
         return False
     finally:
         if conn:
@@ -1055,33 +1267,20 @@ def process_all_pending_emails():
 
 
 def test_static_email():
-    title = "Monthly 20GP/40HC purchase — one-way into Russia"
-    content = """
-Hi Team, 
-Hello Coco,
-I came across Hysun and reached out directly — as a container manufacturer you can give us both new and CW units at volume, which is exactly what we need. I head the container desk at R-Way Logistics, a freight forwarder on the China → Russia corridor.
-We act as agents of a shipping line handling around 6,500 TEU per month, part of which is passed to us to place. To serve that flow we continuously buy and lease marine containers — one-way into Russia — and we'd rather build a steady supply line with one strong manufacturer than chase spot lots.
-Every month we take 20GP and 40HC — new and CW — one-way / drop-off ex China → Russia, in repeat volume. We decide fast, work principal-to-principal, and pay promptly through our Russian entity.
-Please send your commercial offer — per-unit prices (new and CW) for one-way into Russia, lead time and payment terms. WeChat works well; my ID is below.
- 
- 
- 
- 
-With respect
-Maxim Nikolaevich Efimov
-+7 960 253 54 23
- 
-WeChat ID: Merlin_182 
-Logistics, customs clearance, 
-rental of container equipment.
-Import/Export
-https://www.r-way-logistics.ru/ 
- 
-https://t.me/cargochina_ru
-"""
+    title = "NEED TRIDOOR IN MTL"
+    content = """Hello,
+
+
+ Price for 
+
+
+ 20TRIDOOR in Montreal
+
+
+ thanks!"""
     generate_ai_reply(title, content, 2)
 
 
 if __name__ == "__main__":
-    test_static_email()
-    # process_all_pending_emails()
+    # test_static_email()
+    process_all_pending_emails()
