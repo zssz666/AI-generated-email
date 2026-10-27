@@ -131,7 +131,7 @@ INVENTORY_API_URL=http://your-backend/inventory-search
 
 ## 🚀 如何运行
 
-在 `main.py` 中，你可以根据场景选择不同的起飞方式：
+在 `rebee_ai_reply.py` 中，你可以根据场景选择不同的起飞方式：
 
 ```bash
 # 模式一：手动触发全量批处理 (推荐日常跑批或定时任务使用)
@@ -142,7 +142,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ```
 
-*如果你想本地调教 Prompt，可以打开 `main.py` 底部的 `test_static_email()` 方法，直接粘一段邮件文本进去测，免去频繁读写数据库的烦恼。*
+*如果你想本地调教 Prompt，可以打开 `rebee_ai_reply.py` 底部的 `test_static_email()` 方法，直接粘一段邮件文本进去测，免去频繁读写数据库的烦恼。*
 
 ---
 

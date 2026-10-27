@@ -1,30 +1,70 @@
 {
-  "version": "3.0",
+  "version": "3.2",
+  "changelog": [
+    "3.2: 未注明箱况统一优先NEW；新增USD单箱预算字段和新箱超预算300美元的额外报价策略。",
+    "3.1: 修复 response_guard_file 与实际加载不一致；补齐 risk_intents 对应模块；扩展 intent_priority 完整覆盖；schema 增加 intercept_reason 与 confidence；新增 router/drafter/reviewer 可调参数配置。",
+    "3.0: 引入 multi_intent、secondary_intent_rules、risk_intents。"
+  ],
+  "skills_dir": "skills",
+  "module_dir": "skills/modules",
   "global_rules_file": "global_rules.md",
-  "response_guard_file": "response_guard.md",
+  "response_guard_file": "02_response_guard.md",
   "entity_rules_file": "entity_rules.md",
+  "router_engine_file": "00_router_engine.md",
+  "sales_inquiry_file": "01_sales_inquiry.md",
   "router_config": {
     "multi_intent": true,
     "max_secondary_intents": 3,
+    "temperature": 0.0,
+    "max_tokens": 8000,
+    "max_retries": 3,
+    "retry_backoff_base": 2,
     "intent_priority": [
       "NON_BUSINESS_EMAIL",
       "BANK_ACCOUNT_CHANGE_REQUEST",
       "URGENT_PAYMENT_CHANGE",
+      "THIRD_PARTY_PAYMENT_REQUEST",
+      "CRYPTO_PAYMENT_REQUEST",
       "PAYMENT_RISK_CHECK",
       "STRATEGIC_BULK_INQUIRY",
-      "VENDOR_INVOICE_RELEASE_REQUEST",
-      "PAYMENT_CONFIRMATION_REQUEST",
-      "VENDOR_PAYMENT_REMINDER",
+      "STOCK_PRICE_INQUIRY",
+      "QUOTE_ACKNOWLEDGMENT",
+      "ORDER_CONFIRM_INVOICE",
+      "INTERMEDIARY_COMMISSION_ORDER",
+      "EXTENSION_REQUEST",
+      "RELEASE_STATUS_CHECK",
+      "OWNERSHIP_TRANSFER_TRACKING",
+      "DOCUMENT_REQUEST",
+      "PICKUP_SCHEDULE_REQUEST",
       "COMPLAINT_CONDITION",
       "ORDER_CANCELLATION",
-      "ORDER_CONFIRM_INVOICE"
+      "COST_NEGOTIATION",
+      "VENDOR_PAYMENT_REMINDER",
+      "VENDOR_INVOICE_RECEIVED",
+      "VENDOR_INVOICE_RELEASE_REQUEST",
+      "DUPLICATE_INVOICE_REPORT",
+      "PAYMENT_STATUS_INQUIRY",
+      "PAYMENT_CONFIRMATION_REQUEST",
+      "WIRE_PROOF_REQUEST"
     ]
+  },
+  "drafter_config": {
+    "temperature": 0.1,
+    "temperature_on_retry": 0.0,
+    "max_tokens": 5000,
+    "max_retries": 3
+  },
+  "reviewer_config": {
+    "temperature": 0.0,
+    "max_tokens": 1000,
+    "max_retry_rounds": 2
   },
   "non_business_config": {
     "enabled": true,
     "intent": "NON_BUSINESS_EMAIL",
     "action": "NO_REPLY",
     "priority": "HIGHEST",
+    "match_mode": "ANY",
     "signals": [
       "Deal ID",
       "Deal summary",
@@ -46,7 +86,8 @@
       "Marketplace notification",
       "Alibaba notification",
       "LinkedIn notification"
-    ]
+    ],
+    "note": "命中任意 signal，或发件来源属于 sources 之一，即判定 NON_BUSINESS_EMAIL，action=NO_REPLY。此项优先级最高，覆盖其他所有意图。"
   },
   "intent_to_module": {
     "NON_BUSINESS_EMAIL": null,
@@ -72,9 +113,17 @@
     "PAYMENT_STATUS_INQUIRY": "modules/07_finance_payment.md",
     "PAYMENT_CONFIRMATION_REQUEST": "modules/07_finance_payment.md",
     "WIRE_PROOF_REQUEST": "modules/07_finance_payment.md",
-    "PAYMENT_RISK_CHECK": "modules/07_finance_payment.md"
+    "PAYMENT_RISK_CHECK": "modules/07_finance_payment.md",
+    "THIRD_PARTY_PAYMENT_REQUEST": "modules/07_finance_payment.md",
+    "CRYPTO_PAYMENT_REQUEST": "modules/07_finance_payment.md"
   },
   "secondary_intent_rules": {
+    "NON_BUSINESS_EMAIL": [],
+    "STRATEGIC_BULK_INQUIRY": [],
+    "STOCK_PRICE_INQUIRY": [
+      "DOCUMENT_REQUEST",
+      "PICKUP_SCHEDULE_REQUEST"
+    ],
     "VENDOR_INVOICE_RECEIVED": [
       "WIRE_PROOF_REQUEST",
       "PICKUP_SCHEDULE_REQUEST",
@@ -92,7 +141,19 @@
     "PAYMENT_CONFIRMATION_REQUEST": [
       "WIRE_PROOF_REQUEST"
     ],
+    "PAYMENT_STATUS_INQUIRY": [
+      "WIRE_PROOF_REQUEST"
+    ],
     "BANK_ACCOUNT_CHANGE_REQUEST": [
+      "PAYMENT_RISK_CHECK"
+    ],
+    "URGENT_PAYMENT_CHANGE": [
+      "PAYMENT_RISK_CHECK"
+    ],
+    "THIRD_PARTY_PAYMENT_REQUEST": [
+      "PAYMENT_RISK_CHECK"
+    ],
+    "CRYPTO_PAYMENT_REQUEST": [
       "PAYMENT_RISK_CHECK"
     ]
   },
@@ -103,34 +164,48 @@
     "THIRD_PARTY_PAYMENT_REQUEST",
     "CRYPTO_PAYMENT_REQUEST"
   ],
+  "risk_level_mapping": {
+    "BANK_ACCOUNT_CHANGE_REQUEST": "HIGH",
+    "URGENT_PAYMENT_CHANGE": "HIGH",
+    "THIRD_PARTY_PAYMENT_REQUEST": "HIGH",
+    "CRYPTO_PAYMENT_REQUEST": "HIGH",
+    "PAYMENT_RISK_CHECK": "MEDIUM",
+    "COMPLAINT_CONDITION": "MEDIUM",
+    "ORDER_CANCELLATION": "MEDIUM"
+  },
   "router_output_schema": {
-    "primary_intent": "string (e.g. STOCK_PRICE_INQUIRY, STRATEGIC_BULK_INQUIRY, NON_BUSINESS_EMAIL)",
+    "primary_intent": "string — 必须来自 intent_to_module 的 key，禁止自创。例如 STOCK_PRICE_INQUIRY, STRATEGIC_BULK_INQUIRY, NON_BUSINESS_EMAIL, BANK_ACCOUNT_CHANGE_REQUEST",
     "secondary_intents": [
-      "string"
+      "string — 必须来自 intent_to_module 的 key，且数量不超过 router_config.max_secondary_intents"
     ],
-    "action": "REPLY/NO_REPLY",
+    "action": "REPLY | NO_REPLY",
+    "intercept_reason": "string — 仅当 action=NO_REPLY 时填写，一行简短中文，说明拦截原因",
+    "risk_level": "LOW | MEDIUM | HIGH",
+    "confidence": "number — 0.0~1.0，表示 primary_intent 判定的置信度",
     "entities": {
-      "container_type": "string",
-      "requested_color": "string",
-      "requested_condition": "string",
-      "container_number": "string",
-      "invoice_number": "string",
-      "pi_number": "string",
-      "release_code": "string",
-      "company_role": "customer/vendor/intermediary",
-      "target_location": "string",
-      "sender_name": "string",
+      "container_type": "string — 系统箱型缩写，多箱型用英文逗号分隔；缺失填空字符串",
+      "requested_color": "string — 客户指定颜色，缺失填空字符串",
+      "requested_condition": "string — 客户指定箱况，缺失填空字符串",
+      "container_number": "string — 11 位标准箱号，缺失填空字符串",
+      "invoice_number": "string — 缺失填空字符串",
+      "pi_number": "string — PI 号（HM 开头），缺失填空字符串",
+      "release_code": "string — 放箱码，缺失填空字符串",
+      "company_role": "customer | vendor | intermediary",
+      "target_location": "string — 提箱城市/国家/大洲；缺失填空字符串",
+      "sender_name": "string — 发件人姓名，缺失填空字符串",
       "requested_quantity": 0,
       "line_items": [
         {
-          "container_type": "",
-          "condition": "",
-          "color": "",
-          "location": "",
-          "quantity": 0
+          "container_type": "string — 与顶层 container_type 同义，单条询盘的箱型",
+          "condition": "string — 与顶层 requested_condition 同义（简写）",
+          "color": "string — 与顶层 requested_color 同义（简写）",
+          "location": "string — 与顶层 target_location 同义（简写）",
+          "quantity": 0,
+          "expected_unit_price_usd": 0
         }
-      ]
+      ],
+      "expected_unit_price_usd": "number — 客户明确提出的USD单箱预期采购单价，如每台USD1500写1500；未提及或只有其他货币/整单总预算/价格区间则填0；严禁猜测"
     },
-    "risk_level": "LOW/MEDIUM/HIGH"
+    "schema_note": "line_items 内使用简写字段名（condition/color/location），顶层使用长名（requested_condition/requested_color/target_location）。这是历史兼容设计，AI 输出时必须严格遵守，不可混用。 expected_unit_price_usd 在顶层及 line_items 内均为USD单箱目标价；多箱型必须分行分别填写，无法确认归属则为0。"
   }
 }
