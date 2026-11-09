@@ -12,8 +12,107 @@ import pymysql
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from http import HTTPStatus
+from urllib.parse import urljoin, urlsplit
+
+from requests import RequestException
+DEFAULT_TIMEOUT_SECONDS = 5
+AUTH_EXPIRED_HEADER = "X-Hysun-Auth"
+AUTH_EXPIRED_MARKER = "expired"
+
+class HysunAPIError(RuntimeError):
+    """系统接口或认证失败；不能解释为客户信息缺失或无库存。"""
+
+
+class HysunClient:
+    def __init__(self, session, settings):
+        self.session = session
+        self.base_url = (settings.get("HYSUN_BASE_URL") or "").rstrip("/") + "/"
+        self._username = settings.get("HYSUN_USERNAME")
+        self._password = settings.get("HYSUN_PASSWORD")
+        self._authenticated = False
+        parsed = urlsplit(self.base_url)
+        if (parsed.scheme not in ("http", "https") or not parsed.netloc
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise HysunAPIError("HYSUN_BASE_URL 必须是包含应用路径的有效 HTTP/HTTPS 基础地址")
+
+    def _url(self, endpoint):
+        if not endpoint:
+            raise HysunAPIError("HYSUN 接口地址未配置")
+        url = urljoin(self.base_url, endpoint.lstrip("/"))
+        if not url.startswith(self.base_url):
+            raise HysunAPIError("接口地址必须位于 HYSUN_BASE_URL 下，请检查 INVENTORY_API_URL")
+        return url
+
+    def _send(self, method, url, **kwargs):
+        try:
+            return self.session.request(method, url, allow_redirects=False, **kwargs)
+        except RequestException as error:
+            raise HysunAPIError(f"HYSUN 请求失败：{type(error).__name__}") from None
+
+    @staticmethod
+    def _json(response):
+        if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            raise HysunAPIError(f"HYSUN 接口返回 HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise HysunAPIError("HYSUN 接口未返回有效 JSON") from None
+        if not isinstance(payload, dict):
+            raise HysunAPIError("HYSUN 接口响应必须是 JSON 对象")
+        return payload
+
+    def login(self):
+        self._authenticated = False
+        if not self._username or not self._password:
+            raise HysunAPIError("请在 .env 配置 HYSUN_USERNAME 和 HYSUN_PASSWORD")
+        response = self._send("POST", self._url("LoginServlet"),
+                              json={"username": self._username, "password": self._password},
+                              timeout=DEFAULT_TIMEOUT_SECONDS)
+        payload = self._json(response)
+        message = payload.get("message")
+        if isinstance(message, dict) and message.get("code") == HTTPStatus.BAD_REQUEST:
+            raise HysunAPIError("HYSUN 登录失败：账号或密码错误")
+        if not isinstance(message, dict) or message.get("code") != HTTPStatus.OK:
+            raise HysunAPIError("HYSUN 登录失败：响应未确认登录成功")
+        if not self.session.cookies:
+            raise HysunAPIError("HYSUN 登录未建立 Cookie 会话")
+        self._authenticated = True
+
+    @staticmethod
+    def _expired(response):
+        if response.status_code != HTTPStatus.UNAUTHORIZED:
+            return False
+        if response.headers.get(AUTH_EXPIRED_HEADER) == AUTH_EXPIRED_MARKER:
+            return True
+        try:
+            payload = response.json()
+        except ValueError:
+            return False
+        return isinstance(payload, dict) and payload.get("code") == "SESSION_EXPIRED"
+
+    def request(self, method, endpoint, **kwargs):
+        url = self._url(endpoint)
+        kwargs.setdefault("timeout", DEFAULT_TIMEOUT_SECONDS)
+        if not self._authenticated:
+            self.login()
+        response = self._send(method, url, **kwargs)
+        if self._expired(response):
+            self.login()
+            response = self._send(method, url, **kwargs)
+        if response.status_code == HTTPStatus.UNAUTHORIZED:
+            self._authenticated = False
+        payload = self._json(response)
+        message = payload.get("message")
+        if isinstance(message, dict) and message.get("code") != HTTPStatus.OK:
+            raise HysunAPIError("HYSUN 接口报告业务失败，请检查权限及系统服务")
+        return payload
+
+    def get_list(self, endpoint):
+        rows = self.request("GET", endpoint).get("obj")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise HysunAPIError("HYSUN 字典接口 obj 必须是对象数组")
+        return rows
 
 # ==========================================================
 # 0. 自动化日志系统 (控制台与文件双写)
@@ -50,7 +149,7 @@ print(
 # ==========================================================
 # 1. 环境配置 & 数据库
 # ==========================================================
-load_dotenv()
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 ai_client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY"),
@@ -60,8 +159,7 @@ ai_client = OpenAI(
 AI_MODEL = "deepseek-flash"
 
 global_session = requests.Session()
-retries = Retry(total=2, backoff_factor=0.5, status_forcelist=[502, 503, 504])
-global_session.mount('http://', HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
+hysun_client = HysunClient(global_session, os.environ)
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -168,118 +266,91 @@ _FETCHED_BOX_LIST = {"done": False}
 def fetch_system_cities():
     global SYSTEM_CITIES_CACHE
     if not _FETCHED["cities"]:
-        try:
-            resp = global_session.get("http://47.109.176.188:81/ListDepot", timeout=3)
-            SYSTEM_CITIES_CACHE = sorted(
-                list({i.get("dCity").strip() for i in resp.json().get("obj", []) if i.get("dCity")}))
-            _FETCHED["cities"] = True
-        except Exception as exc:
-            print(f"⚠️ [ERP 城市清单读取失败] {exc}")
+        rows = hysun_client.get_list("ListDepot")
+        cities = sorted({i["dCity"].strip() for i in rows if i.get("dCity")})
+        if not cities:
+            raise HysunAPIError("ERP 城市清单为空或缺少 dCity 字段")
+        SYSTEM_CITIES_CACHE = cities
+        _FETCHED["cities"] = True
     return SYSTEM_CITIES_CACHE
 
 
 def fetch_system_countries():
     global SYSTEM_COUNTRIES_CACHE
     if not _FETCHED["countries"]:
-        try:
-            resp = global_session.get("http://47.109.176.188:81/getGcountry", timeout=3)
-            SYSTEM_COUNTRIES_CACHE = [{"ISO2": i.get("ISO2", "").strip().upper(),
-                                       "eName": i.get("eName", "").strip(),
-                                       "cName": i.get("cName", "").strip()}
-                                      for i in resp.json().get("obj", []) if i.get("ISO2") and i.get("eName")]
-            _FETCHED["countries"] = True
-        except:
-            pass
+        rows = hysun_client.get_list("getGcountry")
+        countries = [{"ISO2": i["ISO2"].strip().upper(),
+                      "eName": i["eName"].strip(), "cName": i.get("cName", "").strip()}
+                     for i in rows if i.get("ISO2") and i.get("eName")]
+        if not countries:
+            raise HysunAPIError("ERP 国家清单为空或缺少必要字段")
+        SYSTEM_COUNTRIES_CACHE = countries
+        _FETCHED["countries"] = True
     return SYSTEM_COUNTRIES_CACHE
 
 
 def fetch_system_container_types():
     global SYSTEM_CONTAINER_TYPES_CACHE, SYSTEM_CONTAINER_ID_TO_NAME_CACHE
     if not _FETCHED["types"]:
-        try:
-            resp = global_session.get("http://47.109.176.188:81/getAllBoxServlet", timeout=3)
-            for i in resp.json().get("obj", []):
-                if i.get("id") is not None and i.get("code"):
-                    b_id = str(i["id"]).zfill(2)
-                    c_code = i["code"].lower().replace("'", "").replace(" ", "").replace("-", "")
-                    SYSTEM_CONTAINER_TYPES_CACHE[c_code] = b_id
-                    SYSTEM_CONTAINER_ID_TO_NAME_CACHE[b_id] = i["code"].strip()
-            _FETCHED["types"] = True
-        except:
-            pass
+        rows = hysun_client.get_list("getAllBoxServlet")
+        types, names = {}, {}
+        for i in rows:
+            if i.get("id") is not None and i.get("code"):
+                b_id = str(i["id"]).zfill(2)
+                c_code = i["code"].lower().replace("'", "").replace(" ", "").replace("-", "")
+                types[c_code] = b_id
+                names[b_id] = i["code"].strip()
+        if not types:
+            raise HysunAPIError("ERP 箱型清单为空或缺少必要字段")
+        SYSTEM_CONTAINER_TYPES_CACHE, SYSTEM_CONTAINER_ID_TO_NAME_CACHE = types, names
+        _FETCHED["types"] = True
     return SYSTEM_CONTAINER_TYPES_CACHE
 
 
 def get_box_type_prompt_list():
-    """
-    拉取系统权威箱型清单，格式化为 Router prompt 用的文本。
-    格式：编号 | 缩写 | 英文全称 | 中文全称
-    🌟 失败不缓存，下次调用会重试。
-    """
-    global _FETCHED_BOX_LIST
+    """按系统字典生成 Router 箱型清单；失败不缓存并向调用方报错。"""
     if _FETCHED_BOX_LIST["done"]:
         return _BOX_LIST_CACHE["value"]
-
-    try:
-        resp = global_session.get("http://47.109.176.188:81/getAllBoxServlet", timeout=5)
-        lines = []
-        for i in resp.json().get("obj", []):
-            b_id = str(i.get("id", "")).zfill(2)
-            code = (i.get("code") or "").strip()
-            if not code:
-                continue
-
-            # 兼容多种字段名
-            en = ""
-            for k in ["enName", "ename", "eName", "english", "en", "EnglishName"]:
-                if i.get(k):
-                    en = str(i[k]).strip()
-                    break
-            cn = ""
-            for k in ["cName", "cname", "chinese", "cn", "ChineseName", "name"]:
-                if i.get(k):
-                    cn = str(i[k]).strip()
-                    break
-
-            parts = [b_id, code]
-            if en:
-                parts.append(en)
-            if cn:
-                parts.append(cn)
-            lines.append(" | ".join(parts))
-
-        result = "\n".join(lines)
-        if result.strip():
-            _BOX_LIST_CACHE["value"] = result
-            _FETCHED_BOX_LIST["done"] = True
-            print(f"✅ [箱型清单] 已加载 {len(lines)} 条系统箱型供 Router 对齐")
-        else:
-            print(f"⚠️ [箱型清单] API 返回空，本次不缓存，下次将重试")
-        return result
-    except Exception as e:
-        print(f"⚠️ [箱型清单拉取失败] {e}，本次不缓存，下次将重试")
-        return ""
+    lines = []
+    for item in hysun_client.get_list("getAllBoxServlet"):
+        code = (item.get("code") or "").strip()
+        if not code or item.get("id") is None:
+            continue
+        en = next((str(item[key]).strip() for key in
+                   ("enName", "ename", "eName", "english", "en", "EnglishName") if item.get(key)), "")
+        cn = next((str(item[key]).strip() for key in
+                   ("cName", "cname", "chinese", "cn", "ChineseName", "name") if item.get(key)), "")
+        parts = [str(item["id"]).zfill(2), code, en, cn]
+        lines.append(" | ".join(part for part in parts if part))
+    if not lines:
+        raise HysunAPIError("ERP 箱型清单为空或缺少必要字段")
+    result = "\n".join(lines)
+    _BOX_LIST_CACHE["value"] = result
+    _FETCHED_BOX_LIST["done"] = True
+    print(f"✅ [箱型清单] 已加载 {len(lines)} 条系统箱型供 Router 对齐")
+    return result
 
 
 def fetch_system_colors():
     global SYSTEM_COLORS_CACHE
     if not _FETCHED["colors"]:
-        try:
-            resp = global_session.get("http://47.109.176.188:81/getAllColorServlet", timeout=3)
-            for i in resp.json().get("obj", []):
-                c_code = i.get("color_code", i.get("str", ""))
-                e_name = i.get("color_en", i.get("enname", ""))
-                if c_code == "0000":
-                    e_name = "Mixed"
-                elif c_code == "8888":
-                    e_name = "Camo"
-                elif c_code == "0001":
-                    e_name = "5010/6032"
-                if c_code:
-                    SYSTEM_COLORS_CACHE[c_code] = e_name
-            _FETCHED["colors"] = True
-        except:
-            pass
+        rows = hysun_client.get_list("getAllColorServlet")
+        colors = {}
+        for i in rows:
+            c_code = i.get("color_code", i.get("str", ""))
+            e_name = i.get("color_en", i.get("enname", ""))
+            if c_code == "0000":
+                e_name = "Mixed"
+            elif c_code == "8888":
+                e_name = "Camo"
+            elif c_code == "0001":
+                e_name = "5010/6032"
+            if c_code:
+                colors[c_code] = e_name
+        if not colors:
+            raise HysunAPIError("ERP 颜色清单为空或缺少必要字段")
+        SYSTEM_COLORS_CACHE = colors
+        _FETCHED["colors"] = True
     return SYSTEM_COLORS_CACHE
 
 
@@ -563,7 +634,7 @@ def resolve_erp_location(location_str):
     city_names = [str(c).strip() for c in fetch_system_cities() if str(c).strip()]
     # 如果城市列表获取失败，绝不回退为原始文本直接查询 API。
     if not city_names:
-        raise LocationResolutionError("ERP 城市清单获取失败，无法核实提箱地点")
+        raise HysunAPIError("ERP 城市清单获取失败，无法核实提箱地点")
 
     # 仅识别完整缩写，例如 CHI，不检查 Ho Chi Minh City 中的 Chi。
     abbr = CITY_ABBR_MAPPING.get(raw.upper())
@@ -730,18 +801,11 @@ def _query_single_stock(target_city, target_type, target_cond, color_code, api_u
                "resource": "", "cargo": "", "xcHid": 0, "xcUid": 0,
                "raioxcHid": 0, "raioxcUid": 0, "inventory": 0}
 
-    try:
-        response = global_session.post(api_url, json=payload, headers=headers, timeout=5)
-        if not (response.status_code == 200 and response.text.strip()):
-            if query_cache is not None:
-                query_cache[cache_key] = (None, [])
-            return None, []
-        page_data = response.json().get("obj", {}).get("page", [])
-    except Exception as e:
-        print(f"[API请求异常] {city_location} {target_type} {cond_str} {color_code}: {e}")
-        if query_cache is not None:
-            query_cache[cache_key] = (None, [])
-        return None, []
+    data = hysun_client.request("POST", api_url, json=payload, headers=headers)
+    inventory = data.get("obj")
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("page"), list):
+        raise HysunAPIError("ERP 库存接口缺少有效的 obj.page 数组")
+    page_data = inventory["page"]
 
     best_ground = None
     transit_lines = []
@@ -2095,41 +2159,21 @@ def process_all_pending_emails():
 
 
 def test_static_email():
-    title = "Purchase new containers"
-    content = """Dear sir,
-We are purchasing new empty containers from China, please quote your best rate as below :-
- 
- 
-	New Container
-	Used container
-20ft Container
-	USD…….
-	USD…….
-40ft Container
-	USD…….
-	USD…….
-40ft HQ Container
-	USD…….
-	USD…….
-Open top 
-	USD…….
-	USD…….
- 
- 
-We are waiting your prompt reply.
- 
+    title = "BOSTON"
+    content = """I need 3*20ST 1TRIP RAL1015 in Boston, please include if EOD and which depot.
 
 
-Regards,
- Dinesh Chand 
-Team Member,
-Contracts & Procurement - Aluminium Smelter
-Email: Dinesh.Chand@energy-mgt.com
 
- The email, including attachment(s) thereto, is intended for the confidential use of the designated recipient(s). If you are not an intended recipient, please delete the email and immediately notify the Company. The Company strictly prohibits unauthorized reading, dissemination, distribution, or copying of the same. The contents of the email, unless expressly stated otherwise, are for information purposes only and should not be regarded as an offer or acceptance of an offer or any confirmation thereon. Views expressed by an individual do not necessarily reflect the views of the Company. The email, including attachment(s) thereto, may contain viruses and other shortcomings. The Company does not guarantee the security of any information transmitted through email and is not liable for any interception, corruption, or delays. The Company reserves the right to review and retain copies of the email. Anyone communicating with the Company accepts the risks and the consequences thereon."""
-    generate_ai_reply(title, content, 3, 'Dinesh.Chand@energy-mgt.com')
+		Andrew Reid
+Purchasing Manager
+AAA Desert Container
+
+T: 1-520-771-0005
+E: purchasing@aaa-desertcontainer.com
+www.aaadesertcontainer.com"""
+    generate_ai_reply(title, content, 2, 'AAA Desert Container (Andrew Reid)')
 
 
 if __name__ == "__main__":
-    # test_static_email()
-    process_all_pending_emails()
+    test_static_email()
+    # process_all_pending_emails()

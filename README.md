@@ -120,12 +120,25 @@ DB_USER=xxx
 DB_PASS=xxx
 DB_NAME=xxx
 
-# 内部 ERP/库存系统 API 接口
-INVENTORY_API_URL=http://your-backend/inventory-search
+# HYSUN 系统基础地址（包含应用路径，实际值由部署方填写）
+HYSUN_BASE_URL=
+HYSUN_USERNAME=
+HYSUN_PASSWORD=
+
+# 库存接口：保留当前接口参数；可填相对路径 searchGolbalServlet，
+# 也可保留位于 HYSUN_BASE_URL 下的原完整地址。
+INVENTORY_API_URL=searchGolbalServlet
 
 ```
 
-> 💡 *注：城市、国家、箱型、颜色字典均由系统在启动时通过连接池 `requests.Session` 自动从远端拉取并缓存，告别手动维护硬编码。*
+城市、国家、箱型、颜色和库存接口共用现有 `requests.Session`。
+第一次请求前使用原始账号密码登录 `LoginServlet`，以响应中的 `message.code=200`
+确认成功，并由 Session 自动保存 Cookie；账号密码及 Cookie 不输出到日志。
+仅收到带 `X-Hysun-Auth: expired` 或 `SESSION_EXPIRED` 标记的 HTTP 401 时，
+重新登录并重发原请求一次。重试仍失败、登录失败、超时、服务错误或无效响应会明确报错，
+批处理记为失败状态 `ai_status=3`，不会生成城市追问或无货回复。
+字典在首次需要时获取，成功后缓存；空字典或失败响应不会缓存。
+密码变更后须同步修改 `.env`。本项目不在调用端进行 MD5 加密。
 
 ---
 
